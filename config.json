@@ -29,11 +29,11 @@
             }
         }
     },
-    "port": 6005,
-    "domain": "backend.dev.issuer.eudiw.dev/oidc",
+    "port": 5000,
+    "domain": "issuer.eudiw.dev/oidc",
     "server_name": "{domain}",
-    "base_url": "https://backend.dev.issuer.eudiw.dev/oidc",
-    "authorization_redirect_url": "https://backend.dev.issuer.eudiw.dev/auth_choice",
+    "base_url": "https://issuer.eudiw.dev/oidc",
+    "authorization_redirect_url": "https://issuer.eudiw.dev/auth_choice",
     "op": {
         "server_info": {
             "add_ons": {
@@ -233,7 +233,7 @@
                             "dpop"
                         ],
                         "trusted_attesters_path": "/etc/eudiw/pid-issuer-dev/oidc_trusted_attesters",
-                        "trust_validator_url": "https://dev.trust-validator.eudiw.dev/trust",
+                        "trust_validator_url": "https://trust-validator.eudiw.dev/trust",
                         "status_validator_url": "https://status-validator.issuer.eudiw.dev/status"
                     }
                 },
@@ -352,7 +352,7 @@
         "server_key": "certs/client.key",
         "ca_bundle": null,
         "verify_user": false,
-        "port": 6005,
+        "port": 5000,
         "domain": "{domain}",
         "debug": true
     }
