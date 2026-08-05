@@ -204,11 +204,25 @@ def verify(authn_method):
 
     args = endpoint.authz_part2(request=authz_request, session_id=_session_id)
 
+    if isinstance(args, ResponseMessage) and "error" in args:
+        current_app.logger.error(
+            f"authz_part2 returned error for session {username}: {args.to_dict()}"
+        )
+        return make_response(args.to_json(), 400)
+
     response_dict = args.get("response_args").to_dict()
 
-    request_manager.update_code(session_id=username, code=response_dict["code"])
-    if isinstance(args, ResponseMessage) and "error" in args:
-        return make_response(args.to_json(), 400)
+    code = response_dict.get("code")
+    if code is None:
+        current_app.logger.error(
+            f"No 'code' in response_args for session {username}: {response_dict}"
+        )
+        return make_response(
+            json.dumps({"error": "server_error", "error_description": "no code issued"}),
+            500,
+        )
+
+    request_manager.update_code(session_id=username, code=code)
 
     return do_response(endpoint, request, **args)
 
