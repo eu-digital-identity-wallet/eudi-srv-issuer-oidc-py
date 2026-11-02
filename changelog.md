@@ -42,46 +42,43 @@ _06 Oct 2026_
 
 ## [Unreleased]
 
-Needs the idpy-oidc fork's `branch-refractoring` (installed from `requirements.txt`).
-
 ### Added
-- `cleanup_interval` (minutes, default 60): a background thread (`housekeeping.py`) removes expired authorization requests, redeemed authentication tokens and pushed authorization requests that were never redeemed. Lookups already refused expired entries, but entries nobody looked up again stayed in memory; `/authorization` no longer cleans on every request.
-- `require_wallet_attestation` (default `true`): `false` lets wallets authenticate as public clients at PAR and `/token`; a wallet attestation that is sent is still verified.
-- `par_allowed_htu` (DPoP add-on): the public `/pushed_authorization` URLs a DPoP proof sent there may name.
-- `pop_allowed_aud` (token endpoint `kwargs`): the issuer identifiers of the frontends that relay PAR and `/token`, accepted as the wallet attestation PoP `aud`.
-- `status_validation_context` (token endpoint `kwargs`, default `WalletOrKeyStorageStatus`): the status validator context for the WIA `client_status` (was `PIDStatus`).
-- `rate_limiting.forwarders`: peers whose requests are limited per forwarded wallet address (`X-Forwarded-For`). The issuer frontend relays PAR, so every wallet shared one limit; `trusted_proxies` could not be used since there any client could set the header. Default empty (unchanged behaviour); set it to the frontend's address.
-- The listen address is configurable as `webserver.host` (default `0.0.0.0`, which containers need); it was hard-coded.
+- `cleanup_interval` (minutes, default 60): `housekeeping.py` removes expired authorization requests, tokens and pushed requests in the background.
+- `require_wallet_attestation` (default `true`): `false` lets wallets authenticate as public clients; a sent attestation is still verified.
+- `par_allowed_htu` (DPoP add-on): the public `/pushed_authorization` URLs a DPoP proof may name.
+- `pop_allowed_aud` (token endpoint `kwargs`): the frontends' issuer identifiers, accepted as wallet attestation PoP `aud`.
+- `status_validation_context` (default `WalletOrKeyStorageStatus`, was `PIDStatus`): the status validator context for the WIA `client_status`.
+- `rate_limiting.forwarders`: peers whose requests are limited per `X-Forwarded-For` address (the frontend).
+- `webserver.host` (default `0.0.0.0`); it was hard-coded.
 
 ### Changed
-- Secure defaults for the options OpenID4VCI only recommends; each can be switched off to test wallets without the feature:
-  - PKCE is required, with `S256` only, at `/pushed_authorization` and `/authorization`: the add-on option was misspelt (`code_challenge_method`), so PKCE was optional and `plain` was accepted. `add_ons.pkce.kwargs.essential: false` makes it optional again; a challenge that is sent must still use an accepted method. The server's own pre-authorized code request skips it.
-  - Authorization requests must be pushed (`require_pushed_authorization_requests: true`; HAIP requires it): the plain `/authorization` request registered any `client_id` and `redirect_uri` before any client authentication.
-  - `/token` requires a DPoP proof (`require_dpop: true`); tokens were issued as bearer tokens without one.
-  - `/.well-known/openid-configuration` reports the values in force: `require_pushed_authorization_requests`, `code_challenge_methods_supported`, `token_endpoint_auth_methods_supported`.
-- DPoP is validated and bound by the idpy-oidc fork's DPoP add-on only: `dpop.py` (a second validator, the access token -> key map and the `cnf.jkt` added at `/introspection`) is removed. The fork checks the signature with a public asymmetric key and an allowed `alg`, `typ`, `htm`, `htu` against the configured `allowed_htu`, `iat` (5 minutes old, 60 s ahead) and a single-use `jti`; it binds the grant and its tokens to the key, refuses a refresh with another key or without a proof, and returns `cnf.jkt` from `/introspection`. Errors stay `400 invalid_dpop_proof`. `/token` returns the token endpoint's error responses as they are (JSON).
-- `/authorization` passes only `client_id` and `request_uri` to the authorization endpoint, which resolves the pushed request itself (RFC 9126 section 4).
-- Redirect URIs must be `https`, `http` on a loopback address, or a private-use scheme (RFC 8252 only recommends the reverse-domain form, so `asitplus-wallet://` is accepted) other than `javascript`, `data`, `vbscript`, `file`, `blob` and `about`, without a fragment; `preauth` is reserved for the server's own pre-authorized code request. A pushed request whose client authentication fails leaves the client entry as it was.
-- OAuth error responses follow RFC 6749, RFC 9126 and RFC 9396 (`tests/test_error_conformance.py`, `test_error_conformance_authz.py`): errors are JSON with `error_description` (was `description`); `/pushed_authorization` answers `201 Created`, refuses a pushed `request_uri`, and refuses `authorization_details` that are not a non-empty array of `openid_credential` objects (`invalid_authorization_details`); an unknown or expired `request_uri` at `/authorization` is `400 invalid_request_uri` (was 404) and its `client_id` must match the pushed request's; errors before the pushed request is found are never redirected; a missing `grant_type` is `invalid_request`; token responses carry `Cache-Control: no-store`; POST-only endpoints answer other methods with `405` and `Allow: POST` (was 404); an unknown `/.well-known/` path is 404 (was 400); internal errors are `server_error`.
-- Wallet attestation failures at `/token` and `/pushed_authorization` answer `400 invalid_client`: RFC 6749 section 5.2 requires 401 (with a `WWW-Authenticate` header) only when the client authenticates with the `Authorization` header, which a wallet attestation does not use.
-- Refresh tokens and the issuance usage rules last one week (`expires_in` / `lifetime` 604800 s; wallets re-issue credentials with them), and the session behind a refresh token is kept at least as long, so the token can still be looked up.
-- `server.create_app(config_file)` builds the application; `main()` and the tests use it (the tests copied the build steps before, so start-up was untested). Test coverage 70% -> 98%: `tests/test_server.py`, `test_views.py`, `test_security_helpers.py`, `test_housekeeping.py` and more `test_request_manager.py`.
-- Dependencies are installed from `requirements.txt` like the other services; the idpy-oidc fork follows `branch-refractoring` instead of a pinned commit (an image built from an older pin ran without the wallet attestation fixes).
-- `pyjwt` 2.12.1 -> 2.15.1 (PYSEC-2026-178, PYSEC-2026-4140 to 4152, PYSEC-2026-4183).
-- The Docker build no longer upgrades pip (unpinned); the CI installs semgrep from wheels only (`--only-binary :all:`), so no setup script runs (SonarCloud).
+- Secure defaults, each of which can be switched off for testing:
+  - PKCE is required, `S256` only (`add_ons.pkce.kwargs.essential`); the misspelt option made it optional.
+  - Authorization requests must be pushed (`require_pushed_authorization_requests`, HAIP).
+  - `/token` requires a DPoP proof (`require_dpop`).
+  - `/.well-known/openid-configuration` reports the values in force.
+- DPoP is validated and bound by the idpy-oidc DPoP add-on only; `dpop.py` is removed.
+- `/authorization` passes only `client_id` and `request_uri` to the authorization endpoint (RFC 9126 section 4).
+- Redirect URIs must be `https`, loopback `http` or a private-use scheme (not `javascript`, `data`, `vbscript`, `file`, `blob`, `about`), without a fragment.
+- Error responses follow RFC 6749, RFC 9126 and RFC 9396: JSON with `error_description`, `201` from PAR, `invalid_request_uri`, `invalid_authorization_details`, `405` for wrong methods, `no-store` on token responses.
+- Wallet attestation failures answer `400 invalid_client` (RFC 6749 section 5.2).
+- Refresh tokens, issuance usage rules and their sessions last one week.
+- `server.create_app(config_file)` builds the application, for `main()` and the tests. Coverage 70% -> 98%.
+- Dependencies are installed from `requirements.txt`.
+- `pyjwt` 2.15.1 (PYSEC-2026-178, PYSEC-2026-4140 to 4152, PYSEC-2026-4183).
+- `pipeline.yml` runs on `main` and `branch-*` instead of `dev`, `preprod` and `main`.
+- GitHub Actions: Docker actions pinned to commit SHAs; read-only token permissions per job.
+- The Docker build no longer upgrades pip; CI installs semgrep from wheels only.
+- Removed `yaml_to_json.py`.
+- SonarCloud: `views.py` reads the DPoP header with `.get()`; the CSRF hotspot (S4502) is documented and marked `# NOSONAR`.
 
 ### Fixed
-- A code from an authorization request with `dpop_jkt` could be redeemed with a DPoP proof by any key (RFC 9449 section 10). It is now refused with `invalid_dpop_proof` unless the proof is by that key; a DPoP proof sent with the pushed authorization request binds the code the same way (section 10.1).
-- Concurrent token requests with one authorization or pre-authorized code could each get tokens; the idpy-oidc fork now redeems a code once.
-- tx_code attempt limit under concurrency: a burst of wrong guesses all found the pre-authorized code before any revoked it, so more than 5 were compared (9 of 20 in a local test). `RequestManager.check_tx_code` compares and counts in one locked step and never compares a code that reached the limit; it replaces `register_tx_code_failure`.
-- Concurrent requests registering the same client (the internal pre-authorized client on every credential offer, or a wallet running two flows at once) could see the client entry half-written and fail with "No registered redirect_uri" (500 at `/preauth`), or lose a redirect URI. `dynamic_registration` now runs under a lock, leaves a client untouched when its redirect URI is already registered, adds a new URI to a copy that replaces the entry in one step, and its `restore` takes back only the URI it added (`TestConcurrentRegistration`).
-- Expired authorization requests were not cleaned during the first minute after the host booted: `RequestManager` compared `time.monotonic()` (seconds since boot) with a last-clean time of 0. It now starts at `-inf`, so the first call cleans.
-- Error redirects from `/verify/user` (`authentication_error_redirect`) carry the authorization request's `state` (RFC 6749 4.1.2.1) and append to a `redirect_uri` that already has a query with `&`.
-- `python3 server.py -d <config>` crashed (`app.endpoint_context` does not exist); it prints the provider information from `app.server.get_context()` again.
-- `auth_error_redirect` builds the error redirect from the client's registered redirect URI instead of the request's `redirect_uri` (SonarCloud open redirect, RFC 6749 4.1.2.1). Only registered URIs were accepted before as well, so behaviour is unchanged.
-
-### Security
-- GitHub Actions: the Docker actions of `pipeline.yml` are pinned to full commit SHAs; every workflow has `permissions: {}` at workflow level and read-only permissions per job (`dependencycheck.yml` and `gitleaks.yml` had the default token permissions).
-- Log lines no longer contain the client's `client_id` (rejected redirect URI), `request_uri` (unknown request) or the form of an unsupported token request (SonarCloud log injection); `TestLogInjection`.
-- Removed `yaml_to_json.py` (unused since the configuration is YAML; it was copied into the image).
-- SonarCloud: `views.py` reads the DPoP header with `request.headers.get()`; the reviewed CSRF hotspot in `application.py` (S4502) is documented and marked `# NOSONAR`.
+- A code from a request with `dpop_jkt` could be redeemed with any key's DPoP proof (RFC 9449 section 10).
+- Concurrent token requests with one code could each get tokens.
+- Concurrent wrong `tx_code` guesses could exceed the limit of 5.
+- Concurrent client registrations could fail with "No registered redirect_uri" or lose a redirect URI.
+- Expired authorization requests were not cleaned during the first minute after boot.
+- Error redirects from `/verify/user` lacked `state` (RFC 6749 4.1.2.1) and broke a `redirect_uri` with a query.
+- `python3 server.py -d <config>` crashed.
+- `auth_error_redirect` used the request's `redirect_uri` instead of the registered one (SonarCloud open redirect).
+- Logs contained the client's `client_id`, `request_uri` and token request form (SonarCloud log injection).

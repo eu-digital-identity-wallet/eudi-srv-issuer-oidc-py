@@ -6,7 +6,7 @@
 | `sonar.yml` | push, pull request, manual | `SONAR_TOKEN` | Runs the tests with coverage, then SonarCloud analysis. Fails early with a clear message if `SONAR_TOKEN` is missing. |
 | `gitleaks.yml` | push, manual | none | Gitleaks secret scan of the full history with `gitleaks/gitleaks.toml`; report uploaded as an artifact (non-blocking). |
 | `dependencycheck.yml` | push, manual | none | OWASP Dependency-Check (SCA); HTML report uploaded as an artifact. |
-| `pipeline.yml` | push to dev/preprod/main, `v*` tags, manual | `GHCR_KEY` | Builds the Docker image (amd64 + arm64) and pushes it to `ghcr.io`. |
+| `pipeline.yml` | push to main and `branch-*`, `v*` tags, manual | `GHCR_KEY` | Builds the Docker image (amd64 + arm64) and pushes it to `ghcr.io`. |
 
 ## One-time setup
 
