@@ -65,5 +65,7 @@ jobs:
           # Remove the line below to build for amd64 only (faster CI).
           platforms: linux/amd64,linux/arm64
           cache-from: type=gha
+          # Always reinstall the requirements: git dependencies follow a branch.
+          no-cache-filters: builder
           cache-to: type=gha,mode=max
           provenance: false

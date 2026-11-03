@@ -85,15 +85,18 @@ To install [Flask](https://flask.palletsprojects.com/en/stable/), please follow 
     ```
 
 
-## 5. Make your local EUDIW AUthorization Server available on the Internet (optional)
+## 5. Make your local EUDIW Authorization Server available on the Internet (optional)
 
-If you want to make your local EUDIW AUthorization Server  available on the Internet, we recommend to use NGINX reverse proxy and certbot (to generate an HTTPS certificate).
+The server answers at its issuer, `op.server_info.issuer` (e.g. `https://as.eudiw.dev`), including the RFC 8414 metadata at the host root (`/.well-known/oauth-authorization-server/<frontend id>`). An issuer with a path (`https://issuer.eudiw.dev/oidc`) has every route under that path. See [Issuers](api_docs/configuration.md#issuers). A reverse proxy is optional:
+
+* **Own hostname, no proxy** (e.g. Docker on Azure Container Apps or App Service): set `domain` to the public host (`as.eudiw.dev` gives issuers `https://as.eudiw.dev/<frontend id>`). The platform ingress terminates TLS; `rate_limiting.trusted_proxies: 1` trusts its `X-Forwarded-For`, `-Proto` and `-Host`.
+* **Hostname shared with other services** (e.g. `issuer.eudiw.dev/oidc` next to the issuer frontend): a path router (nginx, Azure Application Gateway or Front Door) must send `/oidc/` and the host-root `/.well-known/oauth-authorization-server/oidc/` and `/.well-known/openid-configuration/oidc/` to this server, without stripping the path. An nginx example follows.
 
 ### 5.1 Install and configure NGINX
 
 1. Follow the installation guide in https://docs.nginx.com/nginx/admin-guide/web-server/reverse-proxy/
 
-2. Configure your local EUDIW Issuer. For example, use the following Nginx configuration file (for a Linux installation):
+2. Configure your local EUDIW Authorization Server. For example, use the following Nginx configuration file (for a Linux installation), with `domain: FQDN/oidc`:
 
 ```nginx
 server {
@@ -109,16 +112,23 @@ server {
     proxy_buffers   4 512k;
     proxy_buffer_size   256k;
 
-# Provider backend
-    location / {
-        # The proxy_pass directive assumes that your local EUDIW Issuer is running at http://127.0.0.1:5000/. 
-        # If not, please adjust it accordingly.
-        proxy_pass                              http://127.0.0.1:5000/;
+# Authorization server: its routes and its RFC 8414 metadata. The proxy_pass
+# directives assume the server runs at http://127.0.0.1:5000; no URI part, so
+# the path is passed unchanged.
+    location /oidc/ {
+        proxy_pass                              http://127.0.0.1:5000;
         proxy_set_header Host                   $http_host;
         proxy_set_header X-Real-IP              $remote_addr;
         proxy_set_header X-Forwarded-For        $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto      $scheme;
     }
+    location ~ ^/\.well-known/(oauth-authorization-server|openid-configuration)/oidc/ {
+        proxy_pass                              http://127.0.0.1:5000;
+        proxy_set_header Host                   $http_host;
+        proxy_set_header X-Forwarded-For        $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto      $scheme;
+    }
+# Other services on this host (e.g. the issuer frontend) go in further locations.
 }
 ```
 

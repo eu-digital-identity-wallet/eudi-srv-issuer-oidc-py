@@ -28,12 +28,19 @@ logging:
       format: "%(asctime)s %(name)s %(levelname)s %(message)s"
 
 port: 5000                              # value for "{port}"
-domain: issuer.eudiw.dev/oidc           # value for "{domain}": public host and path of this server
+domain: as.eudiw.dev                    # value for "{domain}": public host (and path, if any) of this server
 server_name: "{domain}"
-base_url: https://issuer.eudiw.dev/oidc # public URL of this server
+base_url: https://as.eudiw.dev          # public URL of this server
+# The issuer frontends (the ids of the issuer backend's frontend.frontends_config).
+# This server is the authorization server of each, with its own issuer
+# <op.server_info.issuer>/<frontend id>, e.g. https://as.eudiw.dev/<id>,
+# which the backend publishes in that frontend's authorization_servers.
+# Ids: letters, digits, "_" and "-".
+frontends:
+  - 5d725b3c-6d42-448e-8bfd-1eff1fcf152d
 # Issuer backend page the user's browser is sent to after the authorization
 # request (it receives a signed session_token).
-authorization_redirect_url: https://issuer.eudiw.dev/auth_choice
+authorization_redirect_url: https://backend.issuer.eudiw.dev/auth_choice
 # Secret shared with the issuer backend (its authorization_server.api_key).
 # It must send it as X-Api-Key to /preauth_generate and /introspection.
 # Placeholders such as "change-me" count as unset: those endpoints then answer 503.
@@ -43,13 +50,14 @@ backend_api_key: change-me
 # /verify/user (Flask-Limiter, in memory).
 rate_limiting:
   enabled: true
-  # Number of reverse proxies in front of this server whose X-Forwarded-For is
-  # trusted (1 behind nginx). 0 when clients connect directly.
+  # Number of reverse proxies (nginx, a platform ingress) in front of this
+  # server whose X-Forwarded-For, -Proto and -Host are trusted (1 behind one
+  # proxy). 0 when clients connect directly. Applies with rate limiting off too.
   trusted_proxies: 1
   # Addresses (as seen after trusted_proxies) of services that relay wallet
-  # requests and name the wallet in X-Forwarded-For: the issuer frontend, which
-  # proxies PAR. Their requests are limited per wallet; without this, every
-  # relayed PAR shares one limit. Only these peers can choose the limit key.
+  # requests and name the wallet in X-Forwarded-For. Their requests are limited
+  # per wallet; without this, every relayed request shares one limit. Only
+  # these peers can choose the limit key.
   forwarders: []
 
 # Minutes between two removals of expired authorization requests, redeemed
@@ -84,20 +92,10 @@ op:
       dpop:
         function: idpyoidc.server.oauth2.add_on.dpop.add_support
         kwargs:
-          # Asymmetric signature algorithms accepted for DPoP proofs.
+          # Asymmetric signature algorithms accepted for DPoP proofs. A proof's
+          # "htu" must be the token or pushed authorization endpoint of one of
+          # the frontends' issuers (derived from `frontends`).
           dpop_signing_alg_values_supported: [RS256, RS384, RS512, ES256, ES384, ES512, PS256, PS384, PS512]
-          # Token endpoint URLs a proof's "htu" may name (every public URL of /token).
-          allowed_htu:
-            - https://backend.dev.issuer.eudiw.dev/token
-            - https://backend.dev.issuer.eudiw.dev/oidc/token
-            - https://age-verification.issuer.eudiw.dev/token
-          # Pushed authorization endpoint URLs a proof's "htu" may name: a DPoP
-          # proof sent there binds the code to its key (RFC 9449 section 10.1).
-          par_allowed_htu:
-            - https://backend.dev.issuer.eudiw.dev/pushed_authorization
-            - https://backend.dev.issuer.eudiw.dev/oidc/pushed_authorization
-            - https://age-verification.issuer.eudiw.dev/pushed_authorization
-            - https://refractor-ec.dev.issuer.eudiw.dev/pushed_authorization
 
     # Which tokens a grant can produce, and their lifetimes (seconds).
     authz:
@@ -199,8 +197,9 @@ op:
         kwargs:
           # Overridden by require_wallet_attestation at start-up.
           client_authn_method: [wallet_attestation]
-          # Wallet provider certificates trusted for wallet attestations when
-          # the trust validator is not used or not reachable.
+          # Wallet provider certificates (*.pem) trusted for wallet attestations.
+          # Used only without trust_validator_url: with it, the validator alone
+          # decides, and an unreachable validator fails the request.
           trusted_attesters_path: /etc/eudiw/pid-issuer-dev/oidc_trusted_attesters
           # Trust validator (checks the attestation's x5c chain) and status
           # list validator (checks the attestation is not revoked).
@@ -209,10 +208,6 @@ op:
           # Status validator context for the status list behind the WIA's
           # client_status (wallet provider lists, not PID lists).
           status_validation_context: WalletOrKeyStorageStatus
-          # Issuer identifiers of the frontends that relay PAR and /token here
-          # (each frontend's "url"): wallets name them as the PoP "aud".
-          pop_allowed_aud:
-            - https://refractor-ec.dev.issuer.eudiw.dev
       pushed_authorization:
         path: pushed_authorization
         class: idpyoidc.server.oauth2.pushed_authorization.PushedAuthorization
@@ -224,7 +219,11 @@ op:
     httpc_params:
       verify: true
 
-    issuer: "https://{domain}"           # issuer identifier in tokens and metadata
+    # Base of the frontends' issuers (<issuer>/<frontend id>) and issuer of the
+    # session tokens handed to the issuer backend. Every route is served under
+    # its path, if it has one (https://host/oidc -> /oidc/...). A trailing
+    # slash is ignored.
+    issuer: "https://{domain}"
 
     # Signing keys of this server, generated on first start into private_path.
     # The public keys are written to public_path and served at uri_path.

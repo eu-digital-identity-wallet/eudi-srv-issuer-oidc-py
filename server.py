@@ -12,11 +12,11 @@ from idpyoidc.ssl_context import create_context
 try:
     from . import housekeeping
     from .application import oidc_provider_init_app
-    from .security import configure_client_authentication, init_rate_limits
+    from .security import configure_client_authentication, configure_frontends, init_rate_limits, trust_proxies
 except (ModuleNotFoundError, ImportError):
     import housekeeping
     from application import oidc_provider_init_app
-    from security import configure_client_authentication, init_rate_limits
+    from security import configure_client_authentication, configure_frontends, init_rate_limits, trust_proxies
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
 
@@ -73,13 +73,20 @@ def create_app(config_file: str):
         filename=config_file,
         base_path=dir_path,
     )
+    # Frontend issuers are <issuer>/<frontend id>: no double slash, as the
+    # backend strips its authorization_server.base_url too.
+    config.op["issuer"] = str(config.op["issuer"]).rstrip("/")
     app = oidc_provider_init_app(config.op, "oidc_op")
     app.logger = config.logger
 
     app.authorization_redirect_url = config.authorization_redirect_url
+    # The issuer frontends: each has its own issuer, <issuer>/<frontend id>.
+    configure_frontends(app, getattr(config, "frontends", None))
     # Shared with the issuer backend; protects /preauth_generate.
     app.backend_api_key = getattr(config, "backend_api_key", None)
-    init_rate_limits(app, getattr(config, "rate_limiting", None))
+    rate_limiting = getattr(config, "rate_limiting", None) or {}
+    trust_proxies(app, int(rate_limiting.get("trusted_proxies", 0) or 0))
+    init_rate_limits(app, rate_limiting)
     # Non-pushed authorization requests are refused unless this is false.
     app.require_pushed_authorization_requests = getattr(
         config, "require_pushed_authorization_requests", True

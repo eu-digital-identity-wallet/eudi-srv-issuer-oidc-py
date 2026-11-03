@@ -11,7 +11,7 @@ The following **authorization flows** are supported:
 
 ## Authorization flow - step 1 - Push Authorization Request with PKCE (POST)
 
-**Endpoint**: <https://issuer.eudiw.dev/pushed_authorizationv2> (or <https://localhost/pushed_authorizationv2> if installed locally)
+**Endpoint**: `<issuer>/pushed_authorization`, e.g. <https://as.eudiw.dev/FRONTEND_ID/pushed_authorization> (the frontend's issuer, see [configuration](configuration.md#issuers))
 
 The following parameters are supported:
 
@@ -45,7 +45,7 @@ Response:
 
 ## Authorization flow - step 1 - Push Authorization Request without PKCE (POST)
 
-**Endpoint**: <https://issuer.eudiw.dev/pushed_authorizationv2> (or <https://localhost/pushed_authorizationv2> if installed locally)
+**Endpoint**: `<issuer>/pushed_authorization`, e.g. <https://as.eudiw.dev/FRONTEND_ID/pushed_authorization> (the frontend's issuer, see [configuration](configuration.md#issuers))
 
 The following parameters are supported:
 
@@ -76,7 +76,7 @@ Response:
 
 After the `Push Authorization Request` (step 1 of the authorization flow) with or without PKCE.
 
-**Endpoint**: <https://issuer.eudiw.dev/authorizationV3> (or <https://localhost/authorizationV3> if installed locally)
+**Endpoint**: `<issuer>/authorization`, e.g. <https://as.eudiw.dev/FRONTEND_ID/authorization>
 
 
 The following parameters are supported:
@@ -93,7 +93,7 @@ At the end of user authentication, the following parameters are returned:
 
 ## Authorization flow - step 2 - Authorization Request with PKCE and without PAR (GET)
 
-**Endpoint**: <https://issuer.eudiw.dev/authorizationV3> (or <https://localhost/authorizationV3> if installed locally)
+**Endpoint**: `<issuer>/authorization`, e.g. <https://as.eudiw.dev/FRONTEND_ID/authorization>
 
 The following parameters are supported:
 
@@ -108,7 +108,7 @@ The following parameters are supported:
 
 **Example:**
   
-      https://issuer.eudiw.dev/authorizationV3?response_type=code&client_id=ID&redirect_uri=...&scope=eu.europa.ec.eudi.pid.1&code_challenge_method=S256&code_challenge=-ciaVij0VMswVfqm3_GK758-_dAI0E9i97hu1SAOiFQ&authorization_details=[{"type": "openid_credential","credential_configuration_id": "eu.europa.ec.eudi.pid_mdoc"},{"type": "openid_credential","credential_configuration_id":"eu.europa.ec.eudi.mdl_mdoc"}]
+      https://as.eudiw.dev/FRONTEND_ID/authorization?response_type=code&client_id=ID&redirect_uri=...&scope=eu.europa.ec.eudi.pid.1&code_challenge_method=S256&code_challenge=-ciaVij0VMswVfqm3_GK758-_dAI0E9i97hu1SAOiFQ&authorization_details=[{"type": "openid_credential","credential_configuration_id": "eu.europa.ec.eudi.pid_mdoc"},{"type": "openid_credential","credential_configuration_id":"eu.europa.ec.eudi.mdl_mdoc"}]
 
 At the end of user authentication, the following parameters are returned:
 
@@ -119,7 +119,7 @@ At the end of user authentication, the following parameters are returned:
   
 ## Authorization flow - step 2 - Authorization Request without PKCE and without PAR (GET)
 
-**Endpoint**: <https://issuer.eudiw.dev/authorizationV3> (or <https://localhost/authorizationV3> if installed locally)
+**Endpoint**: `<issuer>/authorization`, e.g. <https://as.eudiw.dev/FRONTEND_ID/authorization>
 
 The following parameters are supported:
 
@@ -132,7 +132,7 @@ The following parameters are supported:
 
 **Example:**
   
-      https://issuer.eudiw.dev/authorizationV3?response_type=code&client_id=ID&redirect_uri=...&scope=eu.europa.ec.eudi.pid.1&authorization_details=[{"type": "openid_credential","credential_configuration_id": "eu.europa.ec.eudi.pid_mdoc"},{"type": "openid_credential","credential_configuration_id":"eu.europa.ec.eudi.mdl_mdoc"}]
+      https://as.eudiw.dev/FRONTEND_ID/authorization?response_type=code&client_id=ID&redirect_uri=...&scope=eu.europa.ec.eudi.pid.1&authorization_details=[{"type": "openid_credential","credential_configuration_id": "eu.europa.ec.eudi.pid_mdoc"},{"type": "openid_credential","credential_configuration_id":"eu.europa.ec.eudi.mdl_mdoc"}]
 
 At the end of user authentication, the following parameters are returned:
 

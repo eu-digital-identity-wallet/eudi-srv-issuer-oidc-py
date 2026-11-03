@@ -9,7 +9,8 @@ from cryptojwt.jwt import JWT
 from idpyoidc.message.oauth2 import ResponseMessage
 
 import security
-from security import OneTimeUse, configure_client_authentication, init_rate_limits, redact, valid_redirect_uri
+from security import OneTimeUse, configure_client_authentication, init_rate_limits, redact, trust_proxies, valid_redirect_uri
+from conftest import FE, PREFIX
 
 
 class TestValidRedirectUri:
@@ -143,12 +144,13 @@ class TestRateLimitSettings:
 
     def test_trusted_proxy_address_is_the_client(self, app):
         """Behind one trusted proxy, X-Forwarded-For names the client."""
+        trust_proxies(app, 1)
         init_rate_limits(app, {"trusted_proxies": 1, "limits": {"oidc_op.token": "2 per minute"}})
         client = app.test_client()
 
         def codes(address, n):
             return [
-                client.post("/token", data={"grant_type": "x"}, headers={"X-Forwarded-For": address}).status_code
+                client.post(FE + "/token", data={"grant_type": "x"}, headers={"X-Forwarded-For": address}).status_code
                 for _ in range(n)
             ]
 
@@ -159,7 +161,7 @@ class TestRateLimitSettings:
         init_rate_limits(app, {"forwarders": ["10.0.0.5"], "limits": {"oidc_op.token": "2 per minute"}})
         client = app.test_client()
         codes = [
-            client.post("/token", data={"grant_type": "x"}, environ_base={"REMOTE_ADDR": "10.0.0.5"}).status_code
+            client.post(FE + "/token", data={"grant_type": "x"}, environ_base={"REMOTE_ADDR": "10.0.0.5"}).status_code
             for _ in range(3)
         ]
         assert codes == [400, 400, 429]

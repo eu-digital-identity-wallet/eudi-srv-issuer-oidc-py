@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /install /usr/local
 # Only the application: no tests, docs or key material. Keys are generated at
 # the first start into /app/private (mount a volume there to keep them).
-COPY *.py openid-configuration.json run.sh ./
+COPY *.py run.sh ./
 COPY templates/ ./templates/
 
 # Unprivileged user (fixed UID so host-mounted directories can be granted to

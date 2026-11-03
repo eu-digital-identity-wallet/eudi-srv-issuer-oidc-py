@@ -12,6 +12,7 @@
 import hashlib
 import hmac
 import ipaddress
+import re
 import threading
 import time
 from typing import Any, Dict, Optional
@@ -149,6 +150,70 @@ class OneTimeUse:
 used_authn_tokens = OneTimeUse()
 
 
+#: Frontend ids are a path segment of their issuer identifier.
+FRONTEND_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+#: First path segments of the shared routes, which no frontend id may take.
+RESERVED_FRONTEND_IDS = frozenset({"static", "keys", "verify", "introspection", "preauth_generate"})
+
+
+def load_frontends(frontends) -> tuple:
+    """Checks the ``frontends`` setting: the ids of the issuer frontends.
+
+    Args:
+        frontends: List of frontend ids (the issuer backend's
+            ``frontend.frontends_config`` keys).
+
+    Returns:
+        The ids, in order, without duplicates.
+
+    Raises:
+        ValueError: When the list is empty or an id is not a plain path
+            segment (letters, digits, ``_``, ``-``) or is reserved.
+    """
+    ids = list(frontends or [])
+    if not ids:
+        raise ValueError("frontends: at least one frontend id is required")
+    for frontend_id in ids:
+        if (
+            not isinstance(frontend_id, str)
+            or not FRONTEND_ID_PATTERN.match(frontend_id)
+            or frontend_id in RESERVED_FRONTEND_IDS
+        ):
+            raise ValueError(f"frontends: invalid frontend id {frontend_id!r}")
+    return tuple(dict.fromkeys(ids))
+
+
+def configure_frontends(app, frontends) -> None:
+    """Makes this server the authorization server of each frontend.
+
+    Each frontend has its own issuer, ``<issuer>/<frontend id>``: the DPoP
+    ``htu`` of its token and pushed authorization endpoints are allowed (a
+    request accepts only those of its own issuer, ``CURRENT_ISSUER``), and
+    the signing keys are registered under its issuer, so the server verifies
+    the tokens it issued as that issuer (introspection, refresh).
+    """
+    app.frontends = load_frontends(frontends)
+    context = app.server.get_context()
+    issuers = [f"{context.issuer}/{frontend_id}" for frontend_id in app.frontends]
+    dpop = getattr(context, "add_on", {}).get("dpop")
+    if dpop is not None:
+        dpop["allowed_htu"] = [f"{issuer}/token" for issuer in issuers]
+        dpop["par_allowed_htu"] = [f"{issuer}/pushed_authorization" for issuer in issuers]
+    keyjar = context.keyjar
+    own_keys = keyjar.export_jwks(private=True)
+    for issuer in issuers:
+        keyjar.import_jwks(own_keys, issuer)
+
+
+def trust_proxies(app, proxies: int) -> None:
+    """Trusts ``proxies`` reverse proxies (or a platform ingress) for the
+    client address, scheme and host (``X-Forwarded-For/-Proto/-Host``)."""
+    from werkzeug.middleware.proxy_fix import ProxyFix
+
+    if proxies > 0:
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=proxies, x_proto=proxies, x_host=proxies)
+
+
 #: Endpoints where the wallet authenticates as a client.
 WALLET_CLIENT_ENDPOINTS = ("pushed_authorization", "token")
 
@@ -213,25 +278,22 @@ def init_rate_limits(app, settings=None):
             overrides.
 
             ``forwarders`` lists the addresses of services that relay
-            wallet requests (the issuer frontend proxies PAR) and name the
-            wallet in ``X-Forwarded-For``. Their requests are limited per
-            wallet address; without this every relayed request shares the
-            frontend's limit. Only these peers can choose the key.
+            wallet requests and name the wallet in ``X-Forwarded-For``.
+            Their requests are limited per wallet address; without this
+            every relayed request shares the relay's limit. Only these
+            peers can choose the key.
 
     Returns:
         The limiter, or ``None`` when disabled.
     """
     from flask_limiter import Limiter
     from flask_limiter.util import get_remote_address
-    from werkzeug.middleware.proxy_fix import ProxyFix
 
     settings = settings or {}
     if settings.get("enabled", True) is False:
         app.logger.warning("Rate limiting is disabled")
         return None
     proxies = int(settings.get("trusted_proxies", 0) or 0)
-    if proxies > 0:
-        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=proxies, x_proto=proxies, x_host=proxies)
 
     def too_many_requests(limit):
         app.logger.warning(f"Rate limit exceeded: {limit.limit}")

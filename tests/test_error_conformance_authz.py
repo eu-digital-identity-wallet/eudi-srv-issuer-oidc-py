@@ -15,13 +15,14 @@ import views
 from test_error_conformance import assert_oauth_error
 from test_security import CHALLENGE, CLIENT_ID, REDIRECT_URI, TestWalletAttestationRequired
 from test_views import API_KEY, _code_tokens, key, relaxed  # noqa: F401 (fixtures)
+from conftest import FE, PREFIX
 
 PAR = TestWalletAttestationRequired.PAR
 
 
 def _par(client, headers, drop=(), **extra):
     data = {k: v for k, v in {**PAR, **extra}.items() if k not in drop}
-    return client.post("/pushed_authorization", data=data, headers=headers)
+    return client.post(FE + "/pushed_authorization", data=data, headers=headers)
 
 
 def _request_uri(client, wia, **extra):
@@ -34,7 +35,7 @@ def _authorize(client, request_uri, client_id=CLIENT_ID):
     query = {"request_uri": request_uri}
     if client_id is not None:
         query["client_id"] = client_id
-    return client.get("/authorization", query_string=query)
+    return client.get(FE + "/authorization", query_string=query)
 
 
 def _error_redirect(response):
@@ -51,7 +52,7 @@ class TestPushedAuthorizationRequest:
     @pytest.mark.parametrize("method", ["get", "put", "delete"])
     def test_other_methods_are_405(self, client, method):
         # RFC 9126 section 2.3
-        response = getattr(client, method)("/pushed_authorization")
+        response = getattr(client, method)(FE + "/pushed_authorization")
         assert response.status_code == 405
         assert response.headers["Allow"] == "POST"
 
@@ -144,7 +145,7 @@ class TestAuthorizationRequest:
 
     def test_par_is_required(self, client):
         response = client.get(
-            "/authorization",
+            FE + "/authorization",
             query_string={"client_id": CLIENT_ID, "redirect_uri": REDIRECT_URI, "response_type": "code"},
         )
         assert_oauth_error(response, "invalid_request")
@@ -221,12 +222,12 @@ class TestNonPushedAuthorizationRequest:
     @pytest.mark.parametrize("missing", ["client_id", "redirect_uri", "response_type"])
     def test_missing_parameter(self, relaxed, client, missing):
         args = {k: v for k, v in self.ARGS.items() if k != missing}
-        response = client.get("/authorization", query_string=args)
+        response = client.get(FE + "/authorization", query_string=args)
         assert_oauth_error(response, "invalid_request")
         assert "Location" not in response.headers
 
     def test_unsafe_redirect_uri(self, relaxed, client):
-        response = client.get("/authorization", query_string={**self.ARGS, "redirect_uri": "http://evil.test/cb"})
+        response = client.get(FE + "/authorization", query_string={**self.ARGS, "redirect_uri": "http://evil.test/cb"})
         assert_oauth_error(response, "invalid_request")
         assert "Location" not in response.headers
 
@@ -237,12 +238,12 @@ class TestIntrospection:
     ``unauthorized`` code rather than RFC 6749's invalid_client."""
 
     def _introspect(self, client, token, headers=API_KEY):
-        return client.post("/introspection", data={"token": token} if token else {}, headers=headers)
+        return client.post(PREFIX + "/introspection", data={"token": token} if token else {}, headers=headers)
 
     @pytest.mark.parametrize("method", ["get", "put", "delete"])
     def test_other_methods_are_405(self, client, method):
         # RFC 7662 section 2.1: POST.
-        assert getattr(client, method)("/introspection").status_code == 405
+        assert getattr(client, method)(PREFIX + "/introspection").status_code == 405
 
     @pytest.mark.parametrize("headers", [{}, {"X-Api-Key": "wrong"}])
     def test_caller_not_authenticated(self, client, headers):
@@ -281,12 +282,12 @@ class TestIntrospection:
 class TestRegistrationAndMetadata:
     def test_dynamic_registration_is_not_exposed(self, client):
         # RFC 7591 does not apply: clients are registered by PAR with a WIA.
-        assert client.get("/registration").status_code == 404
-        assert client.post("/registration", json={"redirect_uris": [REDIRECT_URI]}).status_code in (404, 405)
+        assert client.get(PREFIX + "/registration").status_code == 404
+        assert client.post(PREFIX + "/registration", json={"redirect_uris": [REDIRECT_URI]}).status_code in (404, 405)
 
     @pytest.mark.parametrize("service", ["openid-configuration", "oauth-authorization-server"])
     def test_metadata(self, client, service):
-        response = client.get(f"/.well-known/{service}")
+        response = client.get(f"{FE}/.well-known/{service}")
         assert response.status_code == 200
         assert response.mimetype == "application/json"
         metadata = response.get_json()
@@ -297,4 +298,4 @@ class TestRegistrationAndMetadata:
     @pytest.mark.parametrize("service", ["security.txt", "openid-federation", "unknown"])
     def test_unknown_well_known_is_404(self, client, service):
         # RFC 8615 / RFC 8414 section 3: an unknown well-known URI does not exist.
-        assert client.get(f"/.well-known/{service}").status_code == 404
+        assert client.get(f"{FE}/.well-known/{service}").status_code == 404

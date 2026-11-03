@@ -8,7 +8,7 @@ import pytest
 from flask import Flask
 
 import server
-from conftest import BACKEND_API_KEY, _test_config
+from conftest import FE, PREFIX, BACKEND_API_KEY, _test_config
 
 
 def _config(tmp_path, **overrides):
@@ -64,12 +64,12 @@ class TestCreateApp:
             _config(tmp_path, rate_limiting={"limits": {"oidc_op.token": "2 per minute"}})
         )
         client = app.test_client()
-        codes = [client.post("/token", data={"grant_type": "x"}).status_code for _ in range(3)]
+        codes = [client.post(FE + "/token", data={"grant_type": "x"}).status_code for _ in range(3)]
         assert codes == [400, 400, 429]
 
     def test_serves_discovery(self, tmp_path):
         app, _ = server.create_app(_config(tmp_path))
-        response = app.test_client().get("/.well-known/openid-configuration")
+        response = app.test_client().get(FE + "/.well-known/openid-configuration")
         assert response.status_code == 200
         assert response.get_json()["require_pushed_authorization_requests"] is True
 

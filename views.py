@@ -1,11 +1,10 @@
 import copy
 import json
-import os
 import secrets
 import sys
 import threading
 import traceback
-from typing import Union
+from typing import Optional, Union
 from uuid import uuid4
 
 import requests
@@ -14,6 +13,7 @@ from cryptojwt.exception import VerificationError
 from flask import Blueprint
 from flask import Response
 from flask import current_app
+from flask import g
 from flask import redirect
 from flask import render_template
 from flask import request
@@ -32,10 +32,12 @@ from idpyoidc.server.exception import FailedAuthentication
 from idpyoidc.server.exception import ClientAuthenticationError
 from idpyoidc.server.exception import UnAuthorizedClient
 from idpyoidc.server.oidc.token import Token
+from idpyoidc.server.util import CURRENT_ISSUER
 
 # logger = logging.getLogger(__name__)
 
-oidc_op_views = Blueprint("oidc_op", __name__, url_prefix="")
+#: Every route; registered under the path of the issuer (e.g. /oidc).
+oidc_op_views = Blueprint("oidc_op", __name__)
 from application import request_manager
 from security import (
     PREAUTH_REDIRECT_URI,
@@ -45,6 +47,48 @@ from security import (
     used_authn_tokens,
     valid_redirect_uri,
 )
+
+
+def frontend_issuer(frontend_id: str) -> str:
+    """The issuer identifier this server has for a frontend: ``<issuer>/<frontend_id>``."""
+    return f"{current_app.server.get_context().issuer}/{frontend_id}"
+
+
+def use_frontend(frontend_id: Optional[str]) -> bool:
+    """Answers the current request as ``frontend_id``'s issuer.
+
+    Sets :data:`idpyoidc.server.util.CURRENT_ISSUER`, read by the authorization
+    response ``iss``, the token ``iss`` and the client attestation PoP ``aud``
+    checks. Reset at the end of the request (:func:`reset_frontend`).
+
+    Returns:
+        False for a frontend this server does not know.
+    """
+    if frontend_id not in current_app.frontends:
+        return False
+    g.frontend_id = frontend_id
+    g.issuer_token = CURRENT_ISSUER.set(frontend_issuer(frontend_id))
+    return True
+
+
+def reset_frontend(exc=None):
+    """Teardown: the next request on this thread starts without an issuer."""
+    issuer_token = g.pop("issuer_token", None)
+    if issuer_token is not None:
+        CURRENT_ISSUER.reset(issuer_token)
+
+
+@oidc_op_views.url_value_preprocessor
+def _frontend_from_path(endpoint, values):
+    """``/<frontend_id>/...`` routes: an unknown frontend is not found."""
+    if values and "frontend_id" in values:
+        if not use_frontend(values.pop("frontend_id")):
+            abort(404)
+
+
+def _other_frontend(current_request) -> bool:
+    """Tells whether a stored request belongs to another frontend than the path's."""
+    return getattr(current_request, "frontend_id", None) != g.get("frontend_id")
 
 
 def _add_cookie(resp: Response, cookie_spec: Union[dict, list]):
@@ -123,6 +167,39 @@ def do_response(endpoint, req_args, error="", **args) -> Response:
         add_cookie(resp, info["cookie"])
 
     return resp
+
+
+def _issued_code(args: dict, label: str):
+    """Reads the authorization code from an ``authz_part2`` result.
+
+    ``authz_part2`` reports errors inside its result: in ``response_args``,
+    or, for ``response_mode=form_post``, only as the HTML form in
+    ``response_msg`` (no ``response_args``).
+
+    Args:
+        args: The ``authz_part2`` result.
+        label: Session description for the log.
+
+    Returns:
+        ``(code, None)``, or ``(None, error response)``: 400 with the error
+        ``authz_part2`` reported, 500 ``server_error`` when it issued no code.
+    """
+    response_args = args.get("response_args") if isinstance(args, dict) else None
+    response_dict = response_args.to_dict() if response_args is not None else {}
+
+    if "error" in response_dict:
+        current_app.logger.error(f"authz_part2 returned error for {label}: {response_dict}")
+        return None, make_response(json.dumps(response_dict), 400)
+
+    code = response_dict.get("code")
+    if not code:
+        keys = sorted(args) if isinstance(args, dict) else type(args).__name__
+        current_app.logger.error(f"authz_part2 issued no code for {label}: {response_dict or keys}")
+        return None, make_response(
+            json.dumps({"error": "server_error", "error_description": "no code issued"}),
+            500,
+        )
+    return code, None
 
 
 # Error redirection to the wallet during authentication
@@ -263,6 +340,12 @@ def verify(authn_method):
             400,
         )
 
+    # The authorization response names the issuer of the frontend the
+    # wallet started at (RFC 9207).
+    if not use_frontend(getattr(request_manager.get_request(session_id=username), "frontend_id", None)):
+        current_app.logger.warning(f"Authorization verification: session {username} has no known frontend")
+        return _oauth_error("invalid_request", "Unknown frontend")
+
     endpoint = current_app.server.get_endpoint("authorization")
 
     _session_id = endpoint.create_session(
@@ -275,26 +358,9 @@ def verify(authn_method):
 
     args = endpoint.authz_part2(request=authz_request, session_id=_session_id)
 
-    # authz_part2 returns a dict and reports errors inside response_args
-    response_dict = args.get("response_args").to_dict()
-
-    if "error" in response_dict:
-        current_app.logger.error(
-            f"authz_part2 returned error for session {username}: {response_dict}"
-        )
-        return make_response(json.dumps(response_dict), 400)
-
-    code = response_dict.get("code")
-    if code is None:
-        current_app.logger.error(
-            f"No 'code' in response_args for session {username}: {response_dict}"
-        )
-        return make_response(
-            json.dumps(
-                {"error": "server_error", "error_description": "no code issued"}
-            ),
-            500,
-        )
+    code, error = _issued_code(args, f"session {username}")
+    if error is not None:
+        return error
 
     request_manager.update_code(session_id=username, code=code)
 
@@ -316,16 +382,53 @@ def verify_user():
 _AUTH_METHOD_NAMES = {"wallet_attestation": "attest_jwt_client_auth", "public": "none", "none": "none"}
 
 
-def _discovery_document() -> dict:
-    """The static ``openid-configuration.json`` with the values the
-    configuration decides (PAR, PKCE, client authentication) filled in, so
-    wallets see what this server actually requires."""
-    with open(os.path.join(current_app.root_path, "openid-configuration.json"), encoding="utf-8") as f:
-        document = json.load(f)
+#: Signature algorithms accepted for wallet attestations and their PoPs.
+_ATTESTATION_ALGS = ["ES256", "ES384", "ES512"]
+#: Discovery documents served (RFC 8414 and OpenID Connect Discovery).
+METADATA_SERVICES = ("oauth-authorization-server", "openid-configuration")
+
+
+def metadata_document(frontend_id: str) -> dict:
+    """The authorization server metadata of a frontend's issuer.
+
+    Built from the running configuration, so it states what this server
+    actually requires (PAR, PKCE, DPoP algorithms, client authentication).
+    """
     context = current_app.server.get_context()
-    document["require_pushed_authorization_requests"] = bool(
-        getattr(current_app, "require_pushed_authorization_requests", True)
-    )
+    issuer = frontend_issuer(frontend_id)
+    info = context.provider_info
+    document = {
+        "issuer": issuer,
+        "authorization_endpoint": f"{issuer}/authorization",
+        "pushed_authorization_request_endpoint": f"{issuer}/pushed_authorization",
+        "token_endpoint": f"{issuer}/token",
+        "jwks_uri": f"{context.issuer}/static/jwks.json",
+        "require_pushed_authorization_requests": bool(
+            getattr(current_app, "require_pushed_authorization_requests", True)
+        ),
+        "response_types_supported": ["code"],
+        "response_modes_supported": list(info.get("response_modes_supported") or ["query"]),
+        "grant_types_supported": [
+            "authorization_code",
+            "urn:ietf:params:oauth:grant-type:pre-authorized_code",
+            "refresh_token",
+        ],
+        # RFC 9207: the authorization response names this issuer.
+        "authorization_response_iss_parameter_supported": True,
+        "client_attestation_signing_alg_values_supported": list(_ATTESTATION_ALGS),
+        "client_attestation_pop_signing_alg_values_supported": list(_ATTESTATION_ALGS),
+        # OpenID4VCI 1.0 section 12.3: whether a wallet may use a
+        # pre-authorized code without client authentication.
+        "pre-authorized_grant_anonymous_access_supported": not getattr(
+            current_app, "require_wallet_attestation", True
+        ),
+        # OpenID Connect Discovery requires these two.
+        "subject_types_supported": list(info.get("subject_types_supported") or ["public"]),
+        "id_token_signing_alg_values_supported": list(info.get("id_token_signing_alg_values_supported") or ["ES256"]),
+    }
+    dpop = getattr(context, "add_on", {}).get("dpop")
+    if dpop:
+        document["dpop_signing_alg_values_supported"] = list(dpop["algs_supported"])
     pkce = getattr(context, "add_on", {}).get("pkce")
     if pkce:
         document["code_challenge_methods_supported"] = list(pkce["code_challenge_methods"])
@@ -336,17 +439,39 @@ def _discovery_document() -> dict:
     return document
 
 
-@oidc_op_views.route("/.well-known/<service>")
-def well_known(service):
-    if service == "openid-configuration" or service == "oauth-authorization-server":
-        return jsonify(_discovery_document())
-    elif service == "webfinger":
-        _endpoint = current_app.server.get_endpoint("discovery")
-    else:
+def _metadata_response(service, frontend_id):
+    if service not in METADATA_SERVICES or frontend_id not in current_app.frontends:
         # RFC 8615: a well-known URI that is not defined here does not exist.
-        return make_response("Not supported", 404)
+        abort(404)
+    return jsonify(metadata_document(frontend_id))
 
-    return service_endpoint(_endpoint)
+
+@oidc_op_views.route("/<frontend_id>/.well-known/<service>")
+def well_known(service):
+    """Metadata at ``<issuer>/.well-known/<service>`` (OpenID Connect Discovery)."""
+    return _metadata_response(service, g.frontend_id)
+
+
+def well_known_inserted(service, frontend_id):
+    """Metadata at ``/.well-known/<service><issuer path>`` (RFC 8414 section 3.1).
+
+    Registered at the host root by :func:`register_well_known`.
+    """
+    return _metadata_response(service, frontend_id)
+
+
+def register_well_known(app, prefix: str) -> None:
+    """Routes the RFC 8414 discovery URLs, which sit at the host root.
+
+    Args:
+        app: The Flask application.
+        prefix: Path of the issuer (``/oidc``, or ``""``).
+    """
+    app.add_url_rule(
+        f"/.well-known/<service>{prefix}/<frontend_id>",
+        endpoint="well_known_inserted",
+        view_func=well_known_inserted,
+    )
 
 
 def _oauth_error(error, description, status=400):
@@ -469,7 +594,7 @@ def dynamic_registration(client_id, redirect_uri, internal=False):
     return None, restore
 
 
-@oidc_op_views.route("/authorization")
+@oidc_op_views.route("/<frontend_id>/authorization")
 def authorization():
     # 1. Handle PAR Authorization Request
 
@@ -486,9 +611,10 @@ def authorization():
 
         current_request = request_manager.get_request_by_uri(request_uri)
 
-        if not current_request:
+        if not current_request or _other_frontend(current_request):
             current_app.logger.warning("Authorization Request: no pending request for the request_uri")
-            # RFC 9126 section 4: an unknown or expired request_uri is invalid.
+            # RFC 9126 section 4: an unknown or expired request_uri is invalid;
+            # one pushed to another frontend's issuer is unknown to this one.
             return _oauth_error("invalid_request_uri", "unknown or expired request_uri")
 
         # RFC 9126 section 2.2: the request_uri is bound to the client that
@@ -574,6 +700,7 @@ def authorization():
                 state=state,
                 issuer_state=issuer_state,
             )
+            request_manager.update_frontend_id(session_id=session_id, frontend_id=g.frontend_id)
         except Exception as e:
             current_app.logger.error(f"Error adding request: {e}")
             return _oauth_error("server_error", "Failed to process request", 500)
@@ -631,11 +758,8 @@ def authorization():
             encoded_auth_details = urllib.parse.quote(json.dumps(authorization_details))
             redirect_url += "&authorization_details=" + encoded_auth_details
 
-        current_request = request_manager.get_request(session_id=session_id)
-        frontend_id = getattr(current_request, "frontend_id", None) if current_request else None
-
-        if frontend_id:
-            redirect_url += "&frontend_id=" + urllib.parse.quote(frontend_id)
+        frontend_id = g.frontend_id
+        redirect_url += "&frontend_id=" + urllib.parse.quote(frontend_id)
 
         # Signed copy of the session id, scope and authorization details:
         # the backend trusts these claims, not the plain query parameters.
@@ -672,14 +796,13 @@ def authorization():
         )
 
 
-@oidc_op_views.route("/token", methods=["GET", "PUT", "PATCH", "DELETE"])
-@oidc_op_views.route("/pushed_authorization", methods=["GET", "PUT", "PATCH", "DELETE"])
+@oidc_op_views.route("/<frontend_id>/token", methods=["GET", "PUT", "PATCH", "DELETE"])
+@oidc_op_views.route("/<frontend_id>/pushed_authorization", methods=["GET", "PUT", "PATCH", "DELETE"])
 @oidc_op_views.route("/introspection", methods=["GET", "PUT", "PATCH", "DELETE"])
 def post_only():
     """405 for the POST-only endpoints (RFC 9126 section 2.3 for PAR).
 
-    Without these rules the app's static file route (``static_url_path=""``)
-    answers other methods with 404.
+    Answers in JSON with ``Allow: POST``, like the other OAuth errors.
     """
     response = make_response(
         json.dumps({"error": "invalid_request", "error_description": "the request must use POST"}),
@@ -689,7 +812,7 @@ def post_only():
     return response
 
 
-@oidc_op_views.route("/pushed_authorization", methods=["POST"])
+@oidc_op_views.route("/<frontend_id>/pushed_authorization", methods=["POST"])
 def par_endpoint():
 
     # Required parameters
@@ -710,7 +833,6 @@ def par_endpoint():
     code_challenge = request.form.get("code_challenge")
     state = request.form.get("state")
     issuer_state = request.form.get("issuer_state")
-    frontend_id = request.form.get("frontend_id")
 
     # issuer_state comes from the wallet (a credential offer): using it as the
     # session id would let a client choose or overwrite another session.
@@ -772,10 +894,8 @@ def par_endpoint():
             session_id=session_id, request_uri=response.json["request_uri"]
         )
 
-        if frontend_id:
-            request_manager.update_frontend_id(
-                session_id=session_id, frontend_id=frontend_id
-            )
+        # The frontend whose issuer the request was pushed to.
+        request_manager.update_frontend_id(session_id=session_id, frontend_id=g.frontend_id)
 
     except Exception as e:
         current_app.logger.error(f"Error adding request: {e}")
@@ -800,7 +920,7 @@ def _refresh_token_lifetime():
     return _rules.get("expires_in")
 
 
-@oidc_op_views.route("/token", methods=["POST"])
+@oidc_op_views.route("/<frontend_id>/token", methods=["POST"])
 def token():
     response = _token_response()
     # RFC 6749 section 5.1: responses carrying tokens must not be cached.
@@ -842,7 +962,8 @@ def _token_response():
             )
 
         current_request = request_manager.get_request_by_code(code)
-        if current_request is None:
+        # A code is redeemed at the issuer of the frontend it was issued for.
+        if current_request is None or _other_frontend(current_request):
             return make_response(jsonify({"error": "invalid_grant"}), 400)
 
         session_id = current_request.session_id
@@ -905,6 +1026,7 @@ def _token_response():
             current_request is None
             or current_request.pre_authorized_code_ref != pre_authorized_code_from_request
             or request_manager.preauth_code_expired(current_request)
+            or _other_frontend(current_request)
         ):
             error_message = {
                 "error": "invalid_grant",
@@ -983,7 +1105,7 @@ def _token_response():
             refresh_token=refresh_token
         )
 
-        if current_request is None:
+        if current_request is None or _other_frontend(current_request):
             error_message = {
                 "error": "invalid_grant",
             }
@@ -1172,6 +1294,11 @@ def prea_auth():
     scope = request.form.get("scope")  # request_data.get("scope")
     authorization_details = None  # request_data.get("authorization_details")
 
+    # The frontend whose offer this is: the wallet redeems the code at its issuer.
+    frontend_id = request.form.get("frontend_id")
+    if not use_frontend(frontend_id):
+        return _oauth_error("invalid_request", "frontend_id is missing or unknown")
+
     client_id = "eudiw-abca"
     redirect_uri = "preauth"
     response_type = "code"
@@ -1251,6 +1378,7 @@ def prea_auth():
             session_id=session_id,
             tx_code=tx_code,
         )
+        request_manager.update_frontend_id(session_id=session_id, frontend_id=frontend_id)
     except Exception as e:
         current_app.logger.error(f"Error adding request: {e}")
         return jsonify({"error": "Failed to process request"}), 500
@@ -1292,17 +1420,12 @@ def prea_auth():
 
     args = endpoint.authz_part2(request=authz_request, session_id=_session_id)
 
-    # authz_part2 returns a dict and reports errors inside response_args
-    response_dict = args.get("response_args").to_dict()
-
-    if "error" in response_dict:
-        current_app.logger.error(
-            f"authz_part2 returned error for pre-auth session {username}: {response_dict}"
-        )
-        return make_response(json.dumps(response_dict), 400)
+    code, error = _issued_code(args, f"pre-auth session {username}")
+    if error is not None:
+        return error
 
     request_manager.update_pre_authorized_code(
-        session_id=username, pre_authorized_code=response_dict["code"]
+        session_id=username, pre_authorized_code=code
     )
 
     preauth_code_ref = str(uuid4())

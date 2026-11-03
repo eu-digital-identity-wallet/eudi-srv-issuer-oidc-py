@@ -22,6 +22,14 @@ sys.path.insert(0, ROOT)
 
 BACKEND_API_KEY = "k" * 40
 WALLET_CLIENT_ID = "wallet-test"
+#: Path of the test issuer (https://issuer.eudiw.dev/oidc): every route is under it.
+#: config.yaml has none (https://as.eudiw.dev); tests/test_frontends.py covers that.
+PREFIX = "/oidc"
+#: Frontends of the test server; each has the issuer <issuer>/<frontend id>.
+FRONTEND_ID = "fe"
+OTHER_FRONTEND_ID = "fe2"
+#: Path of FRONTEND_ID's issuer: its PAR, authorization, token and metadata.
+FE = f"{PREFIX}/{FRONTEND_ID}"
 
 
 def _self_signed(key, cn):
@@ -110,6 +118,8 @@ def _test_config(tmp_path):
     token_kwargs.pop("trust_validator_url", None)
     token_kwargs.pop("status_validator_url", None)
     config["backend_api_key"] = BACKEND_API_KEY
+    config["frontends"] = [FRONTEND_ID, OTHER_FRONTEND_ID]
+    config["domain"] = "issuer.eudiw.dev" + PREFIX
     config["authorization_redirect_url"] = "https://backend.test/auth_choice"
     # Tests that need rate limits apply them themselves (init_rate_limits).
     config["rate_limiting"] = {"enabled": False}
@@ -137,6 +147,6 @@ def client(app):
 
 @pytest.fixture
 def wia(app):
-    """wia(client_id=..., **kw) -> WIA + PoP headers for this server."""
-    issuer = app.server.get_context().issuer
+    """wia(client_id=..., **kw) -> WIA + PoP headers for FRONTEND_ID's issuer."""
+    issuer = f"{app.server.get_context().issuer}/{FRONTEND_ID}"
     return lambda client_id=WALLET_CLIENT_ID, **kw: make_wia_headers(issuer, client_id, **kw)

@@ -20,8 +20,9 @@ from werkzeug.datastructures import Headers
 import application
 from test_security import CLIENT_ID, REDIRECT_URI, VERIFIER, _dpop_proof, _with_dpop
 from test_views import API_KEY, PREAUTH_GRANT, _code, key  # noqa: F401 (fixture)
+from conftest import FE, FRONTEND_ID, PREFIX
 
-TOKEN_HTU = "https://backend.dev.issuer.eudiw.dev/oidc/token"
+TOKEN_HTU = "https://issuer.eudiw.dev/oidc/fe/token"
 
 
 def assert_oauth_error(response, error, status=400):
@@ -68,7 +69,7 @@ def _code_request(code, **overrides):
 
 def _preauth_code(client):
     return client.post(
-        "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc"}, headers=API_KEY
+        PREFIX + "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc", "frontend_id": FRONTEND_ID}, headers=API_KEY
     ).get_json()
 
 
@@ -78,7 +79,7 @@ def _redeem(client, headers, code, tx_code):
         data["pre-authorized_code"] = code
     if tx_code is not None:
         data["tx_code"] = tx_code
-    return client.post("/token", data=data, headers=headers)
+    return client.post(FE + "/token", data=data, headers=headers)
 
 
 def _expired_wia(wia):
@@ -92,29 +93,29 @@ class TestTokenEndpoint:
     @pytest.mark.parametrize("method", ["get", "put", "delete"])
     def test_other_methods_are_405(self, client, method):
         # RFC 6749 section 3.2: the client MUST use POST.
-        response = getattr(client, method)("/token")
+        response = getattr(client, method)(FE + "/token")
         assert response.status_code == 405
         assert response.headers["Allow"] == "POST"
         assert response.mimetype == "application/json"
 
     def test_missing_dpop_proof(self, client, wia):
         # RFC 9449 section 5 / HAIP: DPoP is required at this server.
-        response = client.post("/token", data=_code_request("x"), headers=wia())
+        response = client.post(FE + "/token", data=_code_request("x"), headers=wia())
         assert_token_error(response, "invalid_dpop_proof")
 
     def test_missing_grant_type(self, client):
         # RFC 6749 section 5.2: a missing required parameter is invalid_request.
-        assert_token_error(client.post("/token", data={}, headers=_with_dpop()), "invalid_request")
+        assert_token_error(client.post(FE + "/token", data={}, headers=_with_dpop()), "invalid_request")
 
     @pytest.mark.parametrize("grant_type", ["password", "client_credentials", "urn:x:unknown"])
     def test_unsupported_grant_type(self, client, grant_type):
-        response = client.post("/token", data={"grant_type": grant_type}, headers=_with_dpop())
+        response = client.post(FE + "/token", data={"grant_type": grant_type}, headers=_with_dpop())
         assert_token_error(response, "unsupported_grant_type")
 
     def test_successful_response_is_not_cached(self, client, wia, key):
         # RFC 6749 section 5.1: Cache-Control: no-store and Pragma: no-cache.
         response = client.post(
-            "/token", data=_code_request(_fresh_code(client)), headers={**wia(), "DPoP": _dpop_proof(key)}
+            FE + "/token", data=_code_request(_fresh_code(client)), headers={**wia(), "DPoP": _dpop_proof(key)}
         )
         assert response.status_code == 200, response.data
         assert response.mimetype == "application/json"
@@ -133,7 +134,7 @@ class TestClientAuthentication:
 
     def _token(self, client, headers, key, **overrides):
         return client.post(
-            "/token",
+            FE + "/token",
             data=_code_request(_fresh_code(client), **overrides),
             headers={**headers, "DPoP": _dpop_proof(key)},
         )
@@ -164,7 +165,7 @@ class TestClientAuthentication:
 
 class TestAuthorizationCodeGrant:
     def _post(self, client, wia, key, data):
-        return client.post("/token", data=data, headers={**wia(), "DPoP": _dpop_proof(key)})
+        return client.post(FE + "/token", data=data, headers={**wia(), "DPoP": _dpop_proof(key)})
 
     def test_missing_code(self, client, wia, key):
         data = _code_request(None)
@@ -180,7 +181,7 @@ class TestAuthorizationCodeGrant:
 
     def test_code_issued_to_another_client(self, client, wia, key):
         data = _code_request(_fresh_code(client), client_id="another-wallet")
-        response = client.post("/token", data=data, headers={**wia("another-wallet"), "DPoP": _dpop_proof(key)})
+        response = client.post(FE + "/token", data=data, headers={**wia("another-wallet"), "DPoP": _dpop_proof(key)})
         assert_token_error(response, "invalid_grant")
 
     def test_redirect_uri_mismatch(self, client, wia, key):
@@ -264,7 +265,7 @@ class TestRefreshTokenGrant:
     @pytest.fixture
     def tokens(self, client, wia, key):
         response = client.post(
-            "/token", data=_code_request(_fresh_code(client)), headers={**wia(), "DPoP": _dpop_proof(key)}
+            FE + "/token", data=_code_request(_fresh_code(client)), headers={**wia(), "DPoP": _dpop_proof(key)}
         )
         assert response.status_code == 200, response.data
         return response.get_json()
@@ -273,7 +274,7 @@ class TestRefreshTokenGrant:
         data = {"grant_type": "refresh_token", "client_id": CLIENT_ID, **extra}
         if refresh_token is not None:
             data["refresh_token"] = refresh_token
-        return client.post("/token", data=data, headers={**headers, "DPoP": _dpop_proof(key)})
+        return client.post(FE + "/token", data=data, headers={**headers, "DPoP": _dpop_proof(key)})
 
     def test_missing_refresh_token(self, client, wia, key):
         assert_token_error(self._refresh(client, wia(), None, key), "invalid_request")

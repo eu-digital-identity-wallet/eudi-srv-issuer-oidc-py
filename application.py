@@ -37,17 +37,23 @@ def oidc_provider_init_app(op_config, name=None, **kwargs):
     # key header; /authorization only starts a flow for a request_uri the
     # wallet pushed; /verify/user needs a single-use token signed for that
     # session by the issuer backend. Reviewed: suppressed below (NOSONAR).
-    app = Flask(name, static_url_path="", **kwargs)  # NOSONAR - CSRF not applicable, see above
+    app = Flask(name, static_folder=None, **kwargs)  # NOSONAR - CSRF not applicable, see above
     app.srv_config = op_config
 
     try:
-        from .views import oidc_op_views
+        from . import views
     except ImportError:
-        from views import oidc_op_views
-
-    app.register_blueprint(oidc_op_views)
+        import views
 
     # Initialize the oidc_provider after views to be able to set correct urls
     app.server = init_oidc_op(app)
+
+    # The routes live under the path of the issuer (https://host/oidc -> /oidc),
+    # so no reverse proxy has to strip it; the RFC 8414 discovery URLs sit at
+    # the host root.
+    prefix = urlparse(app.server.get_context().issuer).path.rstrip("/")
+    app.register_blueprint(views.oidc_op_views, url_prefix=prefix or None)
+    views.register_well_known(app, prefix)
+    app.teardown_request(views.reset_frontend)
 
     return app

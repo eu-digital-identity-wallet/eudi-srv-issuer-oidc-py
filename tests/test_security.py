@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from cryptojwt.jwt import JWT
 
-from conftest import BACKEND_API_KEY, make_wia_headers
+from conftest import FE, FRONTEND_ID, PREFIX, BACKEND_API_KEY, make_wia_headers
 
 import application
 
@@ -21,7 +21,7 @@ CHALLENGE = base64.urlsafe_b64encode(hashlib.sha256(VERIFIER.encode()).digest())
 def _authorize(client, **extra):
     """Runs a pushed authorization request (with a WIA), then the browser's
     authorization request; returns the backend redirect query."""
-    issuer = client.application.server.get_context().issuer
+    issuer = f"{client.application.server.get_context().issuer}/{FRONTEND_ID}"
     args = {
         "client_id": CLIENT_ID,
         "redirect_uri": REDIRECT_URI,
@@ -33,12 +33,12 @@ def _authorize(client, **extra):
         **extra,
     }
     pushed = client.post(
-        "/pushed_authorization", data=args, headers=make_wia_headers(issuer, CLIENT_ID)
+        FE + "/pushed_authorization", data=args, headers=make_wia_headers(issuer, CLIENT_ID)
     )
     assert pushed.status_code in (200, 201), pushed.data
     request_uri = json.loads(pushed.data)["request_uri"]
     response = client.get(
-        "/authorization", query_string={"client_id": CLIENT_ID, "request_uri": request_uri}
+        FE + "/authorization", query_string={"client_id": CLIENT_ID, "request_uri": request_uri}
     )
     assert response.status_code == 302, response.data
     location = response.headers["Location"]
@@ -79,7 +79,7 @@ class TestSessionHandOff:
 
     def test_par_issuer_state_never_becomes_the_session_id(self, client, wia):
         response = client.post(
-            "/pushed_authorization",
+            FE + "/pushed_authorization",
             data={
                 "client_id": CLIENT_ID,
                 "redirect_uri": REDIRECT_URI,
@@ -98,7 +98,7 @@ class TestSessionHandOff:
         mine = _authorize(client)
         other = _authorize(client, state="other-state")
         response = client.get(
-            "/verify/user", query_string={"token": mine["token"], "username": other["session_id"]}
+            PREFIX + "/verify/user", query_string={"token": mine["token"], "username": other["session_id"]}
         )
         assert response.status_code == 400
         assert b"Session mismatch" in response.data
@@ -106,7 +106,7 @@ class TestSessionHandOff:
     def test_verify_user_completes_its_own_session(self, client):
         mine = _authorize(client)
         response = client.get(
-            "/verify/user", query_string={"token": mine["token"], "username": mine["session_id"]}
+            PREFIX + "/verify/user", query_string={"token": mine["token"], "username": mine["session_id"]}
         )
         assert response.status_code == 302
         assert response.headers["Location"].startswith(REDIRECT_URI)
@@ -122,7 +122,7 @@ class TestPreAuthorizedCodes:
 
     def _generate(self, client, key=BACKEND_API_KEY):
         headers = {"X-Api-Key": key} if key else {}
-        return client.post("/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc"}, headers=headers)
+        return client.post(PREFIX + "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc", "frontend_id": FRONTEND_ID}, headers=headers)
 
     @pytest.mark.parametrize("key", [None, "wrong"])
     def test_preauth_generate_requires_the_backend_key(self, client, key):
@@ -138,7 +138,7 @@ class TestPreAuthorizedCodes:
 
     def _redeem(self, client, code, tx_code):
         return client.post(
-            "/token",
+            FE + "/token",
             data={
                 "grant_type": "urn:ietf:params:oauth:grant-type:pre-authorized_code",
                 "pre-authorized_code": code,
@@ -208,14 +208,14 @@ class TestRateLimits:
 
         init_rate_limits(app, {"limits": {"oidc_op.token": "3 per minute"}})
         client = app.test_client()
-        codes = [client.post("/token", data={"grant_type": "x"}).status_code for _ in range(5)]
+        codes = [client.post(FE + "/token", data={"grant_type": "x"}).status_code for _ in range(5)]
         assert codes[:3] == [400, 400, 400] and codes[3:] == [429, 429]
 
     @staticmethod
     def _token_codes(client, remote, forwarded):
         return [
             client.post(
-                "/token", data={"grant_type": "x"}, environ_base={"REMOTE_ADDR": remote},
+                FE + "/token", data={"grant_type": "x"}, environ_base={"REMOTE_ADDR": remote},
                 headers={"X-Forwarded-For": wallet},
             ).status_code
             for wallet in forwarded
@@ -248,7 +248,7 @@ def _with_dpop(headers=None):
     return {**(headers or {}), "DPoP": _dpop_proof(ec.generate_private_key(ec.SECP256R1()))}
 
 
-def _dpop_proof(key, htu="https://backend.dev.issuer.eudiw.dev/oidc/token", htm="POST", iat=None, alg="ES256", jti=None):
+def _dpop_proof(key, htu="https://issuer.eudiw.dev/oidc/fe/token", htm="POST", iat=None, alg="ES256", jti=None):
     import time
     import uuid
 
@@ -286,11 +286,11 @@ class TestDpopBinding:
 
     def _preauth_token(self, client, key, proof=None):
         body = client.post(
-            "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc"}, headers={"X-Api-Key": BACKEND_API_KEY}
+            PREFIX + "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc", "frontend_id": FRONTEND_ID}, headers={"X-Api-Key": BACKEND_API_KEY}
         ).get_json()
         headers = {"DPoP": proof if proof is not None else _dpop_proof(key), **self.wia()}
         return client.post(
-            "/token",
+            FE + "/token",
             data={
                 "grant_type": "urn:ietf:params:oauth:grant-type:pre-authorized_code",
                 "pre-authorized_code": body["preauth_code"],
@@ -305,14 +305,14 @@ class TestDpopBinding:
         body = response.get_json()
         assert body["token_type"] == "DPoP"
         introspection = client.post(
-            "/introspection", data={"token": body["access_token"]}, headers={"X-Api-Key": BACKEND_API_KEY}
+            PREFIX + "/introspection", data={"token": body["access_token"]}, headers={"X-Api-Key": BACKEND_API_KEY}
         ).get_json()
         assert introspection["active"] is True
         assert introspection["cnf"] == {"jkt": _jkt(key)}
 
     def test_introspection_requires_the_backend_key(self, client, key):
         token = self._preauth_token(client, key).get_json()["access_token"]
-        assert client.post("/introspection", data={"token": token}).status_code == 401
+        assert client.post(PREFIX + "/introspection", data={"token": token}).status_code == 401
 
     @pytest.mark.parametrize(
         "variant",
@@ -336,7 +336,7 @@ class TestDpopBinding:
             import jwt as pyjwt
 
             proof = pyjwt.encode(
-                {"jti": "j", "htm": "POST", "htu": "https://backend.dev.issuer.eudiw.dev/oidc/token", "iat": int(time.time())},
+                {"jti": "j", "htm": "POST", "htu": "https://issuer.eudiw.dev/oidc/fe/token", "iat": int(time.time())},
                 "secret-secret-secret-secret-secret",
                 algorithm="HS256",
                 headers={"typ": "dpop+jwt", "jwk": {"kty": "oct", "k": "c2VjcmV0"}},
@@ -372,10 +372,10 @@ class TestLogRedaction:
 
         caplog.set_level(logging.DEBUG)
         body = client.post(
-            "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc"}, headers={"X-Api-Key": BACKEND_API_KEY}
+            PREFIX + "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc", "frontend_id": FRONTEND_ID}, headers={"X-Api-Key": BACKEND_API_KEY}
         ).get_json()
         token = client.post(
-            "/token",
+            FE + "/token",
             data={
                 "grant_type": "urn:ietf:params:oauth:grant-type:pre-authorized_code",
                 "pre-authorized_code": body["preauth_code"],
@@ -399,7 +399,7 @@ class TestParErrors:
             lambda endpoint, get_args=None, parse_kwargs=None: make_response(json.dumps({"error": "unauthorized_client"}), 401),
         )
         response = client.post(
-            "/pushed_authorization",
+            FE + "/pushed_authorization",
             data={"client_id": CLIENT_ID, "redirect_uri": REDIRECT_URI, "response_type": "code"},
         )
         assert response.status_code == 401
@@ -412,7 +412,7 @@ class TestParErrors:
         init_rate_limits(app, {"limits": {"oidc_op.token": "3 per minute"}})
         client = app.test_client()
         codes = {
-            client.post("/preauth_generate", data={"scope": "x"}, headers={"X-Api-Key": BACKEND_API_KEY}).status_code
+            client.post(PREFIX + "/preauth_generate", data={"scope": "x", "frontend_id": FRONTEND_ID}, headers={"X-Api-Key": BACKEND_API_KEY}).status_code
             for _ in range(40)
         }
         assert 429 not in codes
@@ -431,18 +431,18 @@ class TestWalletAttestationRequired:
     }
 
     def _par(self, client, headers=None, **extra):
-        return client.post("/pushed_authorization", data={**self.PAR, **extra}, headers=headers or {})
+        return client.post(FE + "/pushed_authorization", data={**self.PAR, **extra}, headers=headers or {})
 
     def _auth_code(self, client):
         mine = _authorize(client)
         location = client.get(
-            "/verify/user", query_string={"token": mine["token"], "username": mine["session_id"]}
+            PREFIX + "/verify/user", query_string={"token": mine["token"], "username": mine["session_id"]}
         ).headers["Location"]
         return parse_qs(urlsplit(location).query)["code"][0]
 
     def _code_token(self, client, code, headers=None):
         return client.post(
-            "/token",
+            FE + "/token",
             data={
                 "grant_type": "authorization_code",
                 "code": code,
@@ -488,10 +488,10 @@ class TestWalletAttestationRequired:
 
     def test_preauthorized_token_without_wia(self, client):
         body = client.post(
-            "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc"}, headers={"X-Api-Key": BACKEND_API_KEY}
+            PREFIX + "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc", "frontend_id": FRONTEND_ID}, headers={"X-Api-Key": BACKEND_API_KEY}
         ).get_json()
         response = client.post(
-            "/token",
+            FE + "/token",
             data={
                 "grant_type": "urn:ietf:params:oauth:grant-type:pre-authorized_code",
                 "pre-authorized_code": body["preauth_code"],
@@ -513,7 +513,7 @@ class TestPkceRequired:
 
     def test_par_without_code_challenge_is_rejected(self, client, wia):
         data = self._without("code_challenge", "code_challenge_method")
-        response = client.post("/pushed_authorization", data=data, headers=wia())
+        response = client.post(FE + "/pushed_authorization", data=data, headers=wia())
         assert response.status_code == 400
 
     def test_par_with_plain_method_is_rejected(self, client, wia):
@@ -524,7 +524,7 @@ class TestPkceRequired:
         assert self._par(client, wia()).status_code in (200, 201)
 
     def test_only_s256_is_advertised(self, client):
-        metadata = json.loads(client.get("/.well-known/openid-configuration").data)
+        metadata = json.loads(client.get(FE + "/.well-known/openid-configuration").data)
         assert metadata.get("code_challenge_methods_supported") == ["S256"]
 
 
@@ -535,14 +535,14 @@ class TestUnusedEndpointsRemoved:
     @pytest.mark.parametrize(
         "path",
         [
-            "/registration",
-            "/registration_api",
-            "/userinfo",
-            "/session",
-            "/check_session_iframe",
-            "/verify_logout",
-            "/rp_logout",
-            "/post_logout",
+            PREFIX + "/registration",
+            PREFIX + "/registration_api",
+            PREFIX + "/userinfo",
+            PREFIX + "/session",
+            PREFIX + "/check_session_iframe",
+            PREFIX + "/verify_logout",
+            PREFIX + "/rp_logout",
+            PREFIX + "/post_logout",
         ],
     )
     def test_not_routed(self, client, path):
@@ -587,7 +587,7 @@ class TestClientRegistration:
 
     def test_non_pushed_authorization_request_is_refused(self, client):
         response = client.get(
-            "/authorization",
+            FE + "/authorization",
             query_string={
                 "client_id": CLIENT_ID,
                 "redirect_uri": REDIRECT_URI,
@@ -608,8 +608,8 @@ class TestLogInjection:
 
         with caplog.at_level(logging.DEBUG):
             TestWalletAttestationRequired()._par(client, wia(), redirect_uri="https://w.test/cb#\r\nFORGED-1")
-            client.get("/authorization", query_string={"client_id": CLIENT_ID, "request_uri": "urn:x\r\nFORGED-2"})
-            client.post("/token", data={"grant_type": "x\r\nFORGED-3"}, headers=_with_dpop())
+            client.get(FE + "/authorization", query_string={"client_id": CLIENT_ID, "request_uri": "urn:x\r\nFORGED-2"})
+            client.post(FE + "/token", data={"grant_type": "x\r\nFORGED-3"}, headers=_with_dpop())
         # Values may appear escaped inside a logged (redacted) payload, but a
         # line break from the client must never start a new log line.
         for record in caplog.records:
@@ -727,7 +727,7 @@ class TestAuthenticationHandOffToken:
     any key in the server's key jar."""
 
     def _verify(self, client, token, session_id):
-        return client.get("/verify/user", query_string={"token": token, "username": session_id})
+        return client.get(PREFIX + "/verify/user", query_string={"token": token, "username": session_id})
 
     def test_token_is_single_use(self, client):
         mine = _authorize(client)
@@ -768,10 +768,10 @@ class TestDpopRequired:
 
     def test_token_request_without_dpop_is_refused(self, client, wia):
         body = client.post(
-            "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc"}, headers={"X-Api-Key": BACKEND_API_KEY}
+            PREFIX + "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc", "frontend_id": FRONTEND_ID}, headers={"X-Api-Key": BACKEND_API_KEY}
         ).get_json()
         response = client.post(
-            "/token",
+            FE + "/token",
             data={
                 "grant_type": "urn:ietf:params:oauth:grant-type:pre-authorized_code",
                 "pre-authorized_code": body["preauth_code"],
@@ -785,10 +785,10 @@ class TestDpopRequired:
 
 class TestKeysRoute:
     def test_missing_file_is_404_not_500(self, client):
-        assert client.get("/keys/missing.json").status_code == 404
+        assert client.get(PREFIX + "/keys/missing.json").status_code == 404
 
     def test_only_json_files_are_served(self, client):
-        assert client.get("/keys/config").status_code == 404
+        assert client.get(PREFIX + "/keys/config").status_code == 404
 
 
 class TestOptionalProtocolFeatures:
@@ -810,7 +810,7 @@ class TestOptionalProtocolFeatures:
         return app
 
     def _discovery(self, client):
-        return json.loads(client.get("/.well-known/openid-configuration").data)
+        return json.loads(client.get(FE + "/.well-known/openid-configuration").data)
 
     def test_discovery_is_strict_by_default(self, client):
         doc = self._discovery(client)
@@ -825,7 +825,7 @@ class TestOptionalProtocolFeatures:
 
     def test_plain_authorization_request_without_pkce(self, relaxed, client):
         response = client.get(
-            "/authorization",
+            FE + "/authorization",
             query_string={"client_id": CLIENT_ID, "redirect_uri": REDIRECT_URI, "response_type": "code",
                           "scope": "eu.europa.ec.eudi.pid_mdoc", "state": "st"},
         )
@@ -834,7 +834,7 @@ class TestOptionalProtocolFeatures:
 
     def test_plain_authorization_request_still_checks_the_redirect_uri(self, relaxed, client):
         response = client.get(
-            "/authorization",
+            FE + "/authorization",
             query_string={"client_id": CLIENT_ID, "redirect_uri": "javascript:x", "response_type": "code"},
         )
         assert response.status_code == 400
@@ -854,10 +854,10 @@ class TestOptionalProtocolFeatures:
 
     def test_bearer_token_without_dpop_or_wia(self, relaxed, client):
         body = client.post(
-            "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc"}, headers={"X-Api-Key": BACKEND_API_KEY}
+            PREFIX + "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc", "frontend_id": FRONTEND_ID}, headers={"X-Api-Key": BACKEND_API_KEY}
         ).get_json()
         response = client.post(
-            "/token",
+            FE + "/token",
             data={
                 "grant_type": "urn:ietf:params:oauth:grant-type:pre-authorized_code",
                 "pre-authorized_code": body["preauth_code"],

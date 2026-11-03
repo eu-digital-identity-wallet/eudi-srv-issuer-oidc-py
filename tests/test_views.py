@@ -16,7 +16,7 @@ from idpyoidc.server.exception import ClientAuthenticationError, FailedAuthentic
 
 import application
 import views
-from conftest import BACKEND_API_KEY
+from conftest import FE, FRONTEND_ID, PREFIX, BACKEND_API_KEY
 from test_security import (
     CHALLENGE,
     CLIENT_ID,
@@ -58,14 +58,14 @@ def _code(client, **extra):
     """An authorization code for the test wallet."""
     mine = _authorize(client, **extra)
     location = client.get(
-        "/verify/user", query_string={"token": mine["token"], "username": mine["session_id"]}
+        PREFIX + "/verify/user", query_string={"token": mine["token"], "username": mine["session_id"]}
     ).headers["Location"]
     return parse_qs(urlsplit(location).query)["code"][0]
 
 
 def _code_tokens(client, wia, key):
     response = client.post(
-        "/token",
+        FE + "/token",
         data={
             "grant_type": "authorization_code",
             "code": _code(client),
@@ -86,11 +86,11 @@ def _refresh(client, wia, refresh_token, key=None, dpop_header=True):
     data = {"grant_type": "refresh_token", "client_id": CLIENT_ID}
     if refresh_token is not None:
         data["refresh_token"] = refresh_token
-    return client.post("/token", data=data, headers=headers)
+    return client.post(FE + "/token", data=data, headers=headers)
 
 
 def _introspect(client, token, headers=API_KEY):
-    return client.post("/introspection", data={"token": token}, headers=headers)
+    return client.post(PREFIX + "/introspection", data={"token": token}, headers=headers)
 
 
 class TestRefreshTokenGrant:
@@ -170,7 +170,7 @@ class TestRefreshTokenGrant:
         """Without the wallet attestation the token endpoint answers 400 invalid_client."""
         first = _code_tokens(client, wia, key)
         response = client.post(
-            "/token",
+            FE + "/token",
             data={"grant_type": "refresh_token", "refresh_token": first["refresh_token"], "client_id": CLIENT_ID},
             headers={"DPoP": _dpop_proof(key)},
         )
@@ -178,7 +178,7 @@ class TestRefreshTokenGrant:
         assert response.get_json()["error"] == "invalid_client"
 
 
-PAR_HTU = "https://backend.dev.issuer.eudiw.dev/oidc/pushed_authorization"
+PAR_HTU = "https://issuer.eudiw.dev/oidc/fe/pushed_authorization"
 
 
 class TestDpopKeyFromAuthorizationRequest:
@@ -187,7 +187,7 @@ class TestDpopKeyFromAuthorizationRequest:
 
     def _redeem(self, client, wia, code, key):
         return client.post(
-            "/token",
+            FE + "/token",
             data={
                 "grant_type": "authorization_code",
                 "code": code,
@@ -200,15 +200,15 @@ class TestDpopKeyFromAuthorizationRequest:
 
     def _code_from_par(self, client, wia, headers):
         args = {**TestWalletAttestationRequired.PAR, "code_challenge": CHALLENGE, "code_challenge_method": "S256"}
-        pushed = client.post("/pushed_authorization", data=args, headers={**wia(), **headers})
+        pushed = client.post(FE + "/pushed_authorization", data=args, headers={**wia(), **headers})
         assert pushed.status_code == 201, pushed.data
         response = client.get(
-            "/authorization", query_string={"client_id": CLIENT_ID, "request_uri": pushed.get_json()["request_uri"]}
+            FE + "/authorization", query_string={"client_id": CLIENT_ID, "request_uri": pushed.get_json()["request_uri"]}
         )
         assert response.status_code == 302, response.data
         mine = {k: v[0] for k, v in parse_qs(urlsplit(response.headers["Location"]).query).items()}
         location = client.get(
-            "/verify/user", query_string={"token": mine["token"], "username": mine["session_id"]}
+            PREFIX + "/verify/user", query_string={"token": mine["token"], "username": mine["session_id"]}
         ).headers["Location"]
         return parse_qs(urlsplit(location).query)["code"][0]
 
@@ -231,7 +231,7 @@ class TestDpopKeyFromAuthorizationRequest:
     def test_par_proof_must_match_dpop_jkt(self, client, wia, key):
         args = {**TestWalletAttestationRequired.PAR, "dpop_jkt": _jkt(ec.generate_private_key(ec.SECP256R1()))}
         response = client.post(
-            "/pushed_authorization", data=args, headers={**wia(), "DPoP": _dpop_proof(key, htu=PAR_HTU)}
+            FE + "/pushed_authorization", data=args, headers={**wia(), "DPoP": _dpop_proof(key, htu=PAR_HTU)}
         )
         assert response.status_code == 400
         assert response.get_json()["error"] == "invalid_dpop_proof"
@@ -239,7 +239,7 @@ class TestDpopKeyFromAuthorizationRequest:
     def test_invalid_proof_at_par_is_refused(self, client, wia, key):
         # A proof for /token is not one for /pushed_authorization.
         response = client.post(
-            "/pushed_authorization", data=TestWalletAttestationRequired.PAR, headers={**wia(), "DPoP": _dpop_proof(key)}
+            FE + "/pushed_authorization", data=TestWalletAttestationRequired.PAR, headers={**wia(), "DPoP": _dpop_proof(key)}
         )
         assert response.status_code == 400
         assert response.get_json()["error"] == "invalid_dpop_proof"
@@ -256,24 +256,24 @@ def test_pushed_authorization_details_reach_the_token_response(client, wia, key)
 
 class TestTokenErrors:
     def test_unsupported_grant_type(self, client):
-        response = client.post("/token", data={"grant_type": "password"}, headers=_with_dpop())
+        response = client.post(FE + "/token", data={"grant_type": "password"}, headers=_with_dpop())
         assert response.status_code == 400
         assert response.get_json()["error"] == "unsupported_grant_type"
 
     def test_missing_grant_type(self, client):
         """RFC 6749 section 5.2: a missing required parameter is invalid_request."""
-        response = client.post("/token", data={}, headers=_with_dpop())
+        response = client.post(FE + "/token", data={}, headers=_with_dpop())
         assert response.status_code == 400
         assert response.get_json()["error"] == "invalid_request"
 
     def test_authorization_code_missing(self, client):
-        response = client.post("/token", data={"grant_type": "authorization_code"}, headers=_with_dpop())
+        response = client.post(FE + "/token", data={"grant_type": "authorization_code"}, headers=_with_dpop())
         assert response.status_code == 400
         assert response.get_json()["error_description"] == "missing code"
 
     def test_authorization_code_unknown(self, client):
         response = client.post(
-            "/token", data={"grant_type": "authorization_code", "code": "nope"}, headers=_with_dpop()
+            FE + "/token", data={"grant_type": "authorization_code", "code": "nope"}, headers=_with_dpop()
         )
         assert response.status_code == 400
         assert response.get_json() == {"error": "invalid_grant"}
@@ -286,15 +286,15 @@ class TestTokenErrors:
         ],
     )
     def test_pre_authorized_code_missing_parameters(self, client, data, description):
-        response = client.post("/token", data={"grant_type": PREAUTH_GRANT, **data}, headers=_with_dpop())
+        response = client.post(FE + "/token", data={"grant_type": PREAUTH_GRANT, **data}, headers=_with_dpop())
         assert response.status_code == 400
         assert response.get_json()["error_description"] == description
 
     def test_malformed_dpop_proof(self, client, wia):
         """The proof is validated by the idpy-oidc DPoP add-on, on an otherwise valid request."""
-        code = client.post("/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc"}, headers=API_KEY).get_json()
+        code = client.post(PREFIX + "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc", "frontend_id": FRONTEND_ID}, headers=API_KEY).get_json()
         response = client.post(
-            "/token",
+            FE + "/token",
             data={"grant_type": PREAUTH_GRANT, "pre-authorized_code": code["preauth_code"], "tx_code": str(code["tx_code"])},
             headers={**wia(), "DPoP": "not-a-jwt"},
         )
@@ -304,7 +304,7 @@ class TestTokenErrors:
 
 class TestIntrospection:
     def test_missing_key(self, client):
-        response = client.post("/introspection", data={"token": "x"})
+        response = client.post(PREFIX + "/introspection", data={"token": "x"})
         assert response.status_code == 401
         assert response.get_json()["error"] == "unauthorized"
 
@@ -332,9 +332,9 @@ class TestIntrospection:
         assert body["client_id"] == CLIENT_ID
 
     def test_bearer_token_has_no_cnf(self, relaxed, client):
-        code = client.post("/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc"}, headers=API_KEY).get_json()
+        code = client.post(PREFIX + "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc", "frontend_id": FRONTEND_ID}, headers=API_KEY).get_json()
         token = client.post(
-            "/token",
+            FE + "/token",
             data={"grant_type": PREAUTH_GRANT, "pre-authorized_code": code["preauth_code"], "tx_code": str(code["tx_code"])},
         ).get_json()["access_token"]
         body = _introspect(client, token).get_json()
@@ -346,49 +346,52 @@ class TestIntrospection:
 
     def test_endpoint_error_is_passed_on(self, client):
         """A request the introspection endpoint rejects keeps its status."""
-        response = client.post("/introspection", data={}, headers=API_KEY)
+        response = client.post(PREFIX + "/introspection", data={}, headers=API_KEY)
         assert response.status_code == 400
         assert "cnf" not in response.get_json()
 
 
 class TestAuthorizationEndpoint:
     def test_empty_request_uri(self, client):
-        response = client.get("/authorization", query_string={"request_uri": ""})
+        response = client.get(FE + "/authorization", query_string={"request_uri": ""})
         assert response.status_code == 400
         assert response.get_json()["error"] == "invalid_request"
 
     def test_unknown_request_uri(self, client):
-        response = client.get("/authorization", query_string={"client_id": CLIENT_ID, "request_uri": "urn:unknown"})
+        response = client.get(FE + "/authorization", query_string={"client_id": CLIENT_ID, "request_uri": "urn:unknown"})
         assert response.status_code == 400
         assert response.get_json()["error"] == "invalid_request_uri"
 
     def test_par_required(self, client):
-        response = client.get("/authorization", query_string={"client_id": CLIENT_ID})
+        response = client.get(FE + "/authorization", query_string={"client_id": CLIENT_ID})
         assert response.status_code == 400
         assert "pushed authorization request" in response.get_json()["error_description"]
 
     def test_par_without_state(self, client, wia):
         """The state is optional; the redirect still carries the session."""
         pushed = client.post(
-            "/pushed_authorization",
+            FE + "/pushed_authorization",
             data={k: v for k, v in TestWalletAttestationRequired.PAR.items()},
             headers=wia(),
         )
         request_uri = pushed.get_json()["request_uri"]
-        response = client.get("/authorization", query_string={"client_id": CLIENT_ID, "request_uri": request_uri})
+        response = client.get(FE + "/authorization", query_string={"client_id": CLIENT_ID, "request_uri": request_uri})
         assert response.status_code == 302
         assert "session_token=" in response.headers["Location"]
 
     def test_par_frontend_id_and_authorization_details_reach_the_backend(self, app, client):
+        # The frontend is the one whose issuer the request was pushed to; a
+        # frontend_id parameter is ignored.
         details = [{"type": "openid_credential", "credential_configuration_id": "eu.europa.ec.eudi.pid_mdoc"}]
         query = _authorize(client, frontend_id="fe-1", authorization_details=json.dumps(details))
-        assert query["frontend_id"] == "fe-1"
+        assert query["frontend_id"] == FRONTEND_ID
         assert json.loads(query["authorization_details"]) == details
         context = app.server.get_context()
         from cryptojwt.jwt import JWT
 
         claims = JWT(context.keyjar, allowed_sign_algs=["ES256"]).unpack(query["session_token"])
-        assert claims["frontend_id"] == "fe-1"
+        assert claims["iss"] == context.issuer
+        assert claims["frontend_id"] == FRONTEND_ID
         assert claims["authorization_details"] == details
 
     @pytest.mark.parametrize(
@@ -406,7 +409,7 @@ class TestAuthorizationEndpoint:
             raise exc
 
         monkeypatch.setattr(views, "service_endpoint", fail)
-        response = client.get("/authorization", query_string={"client_id": CLIENT_ID, "request_uri": request_uri})
+        response = client.get(FE + "/authorization", query_string={"client_id": CLIENT_ID, "request_uri": request_uri})
         assert response.status_code == 302
         location = response.headers["Location"]
         assert location.startswith(REDIRECT_URI + "?")
@@ -422,7 +425,7 @@ class TestNonPushedAuthorization:
     @pytest.mark.parametrize("missing", ["client_id", "redirect_uri", "response_type"])
     def test_missing_parameters(self, relaxed, client, missing):
         args = {k: v for k, v in self.ARGS.items() if k != missing}
-        response = client.get("/authorization", query_string=args)
+        response = client.get(FE + "/authorization", query_string=args)
         assert response.status_code == 400
         assert response.get_json() == {"error": "invalid_request", "error_description": "Missing required parameters"}
 
@@ -431,13 +434,13 @@ class TestNonPushedAuthorization:
             raise RuntimeError("full")
 
         monkeypatch.setattr(application.request_manager, "add_request", fail)
-        response = client.get("/authorization", query_string=self.ARGS)
+        response = client.get(FE + "/authorization", query_string=self.ARGS)
         assert response.status_code == 500
         assert response.get_json() == {"error": "server_error", "error_description": "Failed to process request"}
 
     def test_pkce_and_issuer_state_are_kept(self, relaxed, client):
         response = client.get(
-            "/authorization",
+            FE + "/authorization",
             query_string={**self.ARGS, "code_challenge": CHALLENGE, "code_challenge_method": "S256",
                           "issuer_state": "offer-1"},
         )
@@ -449,7 +452,7 @@ class TestNonPushedAuthorization:
 
     def test_authorization_details_reach_the_backend(self, relaxed, client):
         details = json.dumps([{"type": "openid_credential", "credential_configuration_id": "x"}])
-        response = client.get("/authorization", query_string={**self.ARGS, "authorization_details": details})
+        response = client.get(FE + "/authorization", query_string={**self.ARGS, "authorization_details": details})
         assert response.status_code == 302
         query = parse_qs(urlsplit(response.headers["Location"]).query)
         stored = application.request_manager.get_request(query["session_id"][0])
@@ -459,19 +462,19 @@ class TestNonPushedAuthorization:
 
 class TestVerifyUser:
     def test_without_token_is_500(self, client):
-        response = client.get("/verify/user", query_string={"username": "x"})
+        response = client.get(PREFIX + "/verify/user", query_string={"username": "x"})
         assert response.status_code == 500
         assert response.data == b"Internal Server Error"
 
     def test_unknown_session_is_a_mismatch(self, client):
         mine = _authorize(client)
-        response = client.get("/verify/user", query_string={"token": mine["token"], "username": "unknown"})
+        response = client.get(PREFIX + "/verify/user", query_string={"token": mine["token"], "username": "unknown"})
         assert response.status_code == 400
         assert json.loads(response.data)["error_description"] == "Session mismatch"
 
     def test_failure_with_jws_token_redirects_the_error(self, client):
         mine = _authorize(client)
-        response = client.get("/verify/user", query_string={"jws_token": mine["token"]})
+        response = client.get(PREFIX + "/verify/user", query_string={"jws_token": mine["token"]})
         assert response.status_code == 302
         location = response.headers["Location"]
         assert location.startswith(REDIRECT_URI + "?")
@@ -482,13 +485,13 @@ class TestVerifyUser:
         }
 
     def test_failure_with_invalid_jws_token(self, client):
-        response = client.get("/verify/user", query_string={"jws_token": "forged"})
+        response = client.get(PREFIX + "/verify/user", query_string={"jws_token": "forged"})
         assert response.status_code == 400
         assert json.loads(response.data)["error_description"] == "Cookie Lost"
 
     def test_error_redirect_carries_the_state(self, client):
         mine = _authorize(client)  # state=st
-        location = client.get("/verify/user", query_string={"jws_token": mine["token"]}).headers["Location"]
+        location = client.get(PREFIX + "/verify/user", query_string={"jws_token": mine["token"]}).headers["Location"]
         assert parse_qs(urlsplit(location).query).get("state") == ["st"]
 
     def test_failed_authentication_renders_the_error_page(self, client, monkeypatch):
@@ -496,7 +499,7 @@ class TestVerifyUser:
             raise FailedAuthentication("Wrong user")
 
         monkeypatch.setattr(views, "verify", fail)
-        response = client.get("/verify/user")
+        response = client.get(PREFIX + "/verify/user")
         assert response.status_code == 200
         assert b"Wrong user" in response.data
 
@@ -507,21 +510,30 @@ class TestVerifyUser:
     def test_authz_part2_error_is_400(self, app, client, monkeypatch):
         mine = _authorize(client)
         self._patch_authz_part2(app, monkeypatch, ResponseMessage(error="access_denied"))
-        response = client.get("/verify/user", query_string={"token": mine["token"], "username": mine["session_id"]})
+        response = client.get(PREFIX + "/verify/user", query_string={"token": mine["token"], "username": mine["session_id"]})
         assert response.status_code == 400
         assert json.loads(response.data) == {"error": "access_denied"}
 
     def test_no_code_issued_is_500(self, app, client, monkeypatch):
         mine = _authorize(client)
         self._patch_authz_part2(app, monkeypatch, ResponseMessage(state="st"))
-        response = client.get("/verify/user", query_string={"token": mine["token"], "username": mine["session_id"]})
+        response = client.get(PREFIX + "/verify/user", query_string={"token": mine["token"], "username": mine["session_id"]})
+        assert response.status_code == 500
+        assert json.loads(response.data)["error"] == "server_error"
+
+    def test_form_post_error_without_response_args_is_500(self, app, client, monkeypatch):
+        # response_mode=form_post errors carry only response_msg (upstream #166).
+        mine = _authorize(client)
+        endpoint = app.server.get_endpoint("authorization")
+        monkeypatch.setattr(endpoint, "authz_part2", lambda request, session_id: {"response_msg": "<form/>"})
+        response = client.get(PREFIX + "/verify/user", query_string={"token": mine["token"], "username": mine["session_id"]})
         assert response.status_code == 500
         assert json.loads(response.data)["error"] == "server_error"
 
     def test_code_is_recorded_for_the_session(self, client):
         mine = _authorize(client)
         location = client.get(
-            "/verify/user", query_string={"token": mine["token"], "username": mine["session_id"]}
+            PREFIX + "/verify/user", query_string={"token": mine["token"], "username": mine["session_id"]}
         ).headers["Location"]
         code = parse_qs(urlsplit(location).query)["code"][0]
         assert application.request_manager.get_request_by_code(code).session_id == mine["session_id"]
@@ -529,7 +541,7 @@ class TestVerifyUser:
 
 class TestPreauthGenerate:
     def _generate(self, client, **data):
-        return client.post("/preauth_generate", data=data, headers=API_KEY)
+        return client.post(PREFIX + "/preauth_generate", data={"frontend_id": FRONTEND_ID, **data}, headers=API_KEY)
 
     def test_without_scope(self, client):
         body = self._generate(client).get_json()
@@ -592,7 +604,7 @@ class TestPreauthGenerate:
 
     def test_unreadable_authentication_token_with_jws_token(self, client, monkeypatch):
         self._bad_jws(monkeypatch)
-        response = client.post("/preauth_generate?jws_token=forged", data={"scope": "x"}, headers=API_KEY)
+        response = client.post(PREFIX + "/preauth_generate?jws_token=forged", data={"scope": "x", "frontend_id": FRONTEND_ID}, headers=API_KEY)
         assert response.status_code == 400
         assert json.loads(response.data)["error_description"] == "Cookie Lost"
 
@@ -605,6 +617,15 @@ class TestPreauthGenerate:
         response = self._generate(client, scope="x")
         assert response.status_code == 400
         assert json.loads(response.data) == {"error": "invalid_scope"}
+
+    @pytest.mark.parametrize("result", [{"response_args": ResponseMessage(state="st")}, {"response_msg": "<form/>"}])
+    def test_no_code_issued_is_500(self, app, client, monkeypatch, result):
+        # No code (or a form_post error without response_args) must not crash (upstream #166).
+        endpoint = app.server.get_endpoint("authorization")
+        monkeypatch.setattr(endpoint, "authz_part2", lambda request, session_id: result)
+        response = self._generate(client, scope="x")
+        assert response.status_code == 500
+        assert json.loads(response.data)["error"] == "server_error"
 
 
 class TestDynamicRegistration:
@@ -664,7 +685,7 @@ class TestParEndpoint:
     @pytest.mark.parametrize("missing", ["client_id", "redirect_uri", "response_type"])
     def test_missing_parameters(self, client, wia, missing):
         data = {k: v for k, v in TestWalletAttestationRequired.PAR.items() if k != missing}
-        response = client.post("/pushed_authorization", data=data, headers=wia())
+        response = client.post(FE + "/pushed_authorization", data=data, headers=wia())
         assert response.status_code == 400
         assert response.get_json() == {"error": "invalid_request", "error_description": "Missing required parameters"}
 
@@ -692,14 +713,15 @@ class TestParEndpoint:
         assert response.get_json() == {"error": "server_error", "error_description": "Failed to process request"}
 
     def test_frontend_id_is_stored(self, client, wia):
+        # The path's frontend, never a frontend_id parameter.
         request_uri = _par(client, wia(), frontend_id="fe-9").get_json()["request_uri"]
-        assert application.request_manager.get_request_by_uri(request_uri).frontend_id == "fe-9"
+        assert application.request_manager.get_request_by_uri(request_uri).frontend_id == FRONTEND_ID
 
 
 class TestDiscoveryAndStatic:
     @pytest.mark.parametrize("service", ["openid-configuration", "oauth-authorization-server"])
     def test_metadata(self, client, service):
-        response = client.get(f"/.well-known/{service}")
+        response = client.get(f"{FE}/.well-known/{service}")
         assert response.status_code == 200
         doc = response.get_json()
         assert doc["require_pushed_authorization_requests"] is True
@@ -707,34 +729,75 @@ class TestDiscoveryAndStatic:
 
     def test_both_metadata_documents_are_the_same(self, client):
         assert (
-            client.get("/.well-known/openid-configuration").get_json()
-            == client.get("/.well-known/oauth-authorization-server").get_json()
+            client.get(FE + "/.well-known/openid-configuration").get_json()
+            == client.get(FE + "/.well-known/oauth-authorization-server").get_json()
         )
 
-    def test_static_values_kept_without_pkce_or_client_authn(self, app, client, monkeypatch):
-        with open("openid-configuration.json") as f:
-            static = json.load(f)
+    def test_issuer_and_endpoints_are_the_frontends(self, client):
+        doc = client.get(FE + "/.well-known/oauth-authorization-server").get_json()
+        issuer = "https://issuer.eudiw.dev" + FE
+        assert doc["issuer"] == issuer
+        assert doc["pushed_authorization_request_endpoint"] == issuer + "/pushed_authorization"
+        assert doc["authorization_endpoint"] == issuer + "/authorization"
+        assert doc["token_endpoint"] == issuer + "/token"
+        assert doc["jwks_uri"] == "https://issuer.eudiw.dev/oidc/static/jwks.json"
+        assert doc["authorization_response_iss_parameter_supported"] is True
+
+    def test_values_in_force(self, client):
+        # Upstream #6 and frontend #14: what the server enforces, not a static file.
+        doc = client.get(FE + "/.well-known/oauth-authorization-server").get_json()
+        assert doc["dpop_signing_alg_values_supported"] == [
+            "RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512"
+        ]
+        assert doc["token_endpoint_auth_methods_supported"] == ["attest_jwt_client_auth"]
+        assert doc["code_challenge_methods_supported"] == ["S256"]
+        assert doc["pre-authorized_grant_anonymous_access_supported"] is False
+
+    def test_without_pkce_or_client_authn(self, app, client, monkeypatch):
         monkeypatch.delitem(app.server.get_context().add_on, "pkce")
         monkeypatch.setattr(app.server.get_endpoint("token"), "client_authn_method", [])
-        doc = client.get("/.well-known/openid-configuration").get_json()
-        assert doc.get("code_challenge_methods_supported") == static.get("code_challenge_methods_supported")
-        assert doc.get("token_endpoint_auth_methods_supported") == static.get("token_endpoint_auth_methods_supported")
+        doc = client.get(FE + "/.well-known/openid-configuration").get_json()
+        assert "code_challenge_methods_supported" not in doc
+        assert "token_endpoint_auth_methods_supported" not in doc
 
-    def test_webfinger(self, client):
-        response = client.get(
-            "/.well-known/webfinger",
-            query_string={"resource": "acct:user@issuer.test", "rel": "http://openid.net/specs/connect/1.0/issuer"},
-        )
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/.well-known/oauth-authorization-server/oidc/fe2",
+            "/.well-known/openid-configuration/oidc/fe2",
+            "/oidc/fe2/.well-known/oauth-authorization-server",
+            "/oidc/fe2/.well-known/openid-configuration",
+        ],
+    )
+    def test_every_discovery_url(self, client, path):
+        # RFC 8414 inserts the well-known path after the host; OpenID Connect
+        # Discovery appends it to the issuer. Both forms of both documents.
+        response = client.get(path)
         assert response.status_code == 200
-        assert response.get_json()["links"][0]["href"] == "https://issuer.eudiw.dev/oidc"
+        assert response.get_json()["issuer"] == "https://issuer.eudiw.dev/oidc/fe2"
 
-    def test_unsupported_service(self, client):
-        response = client.get("/.well-known/security.txt")
-        assert response.status_code == 404
-        assert response.data == b"Not supported"
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/.well-known/oauth-authorization-server/oidc/unknown",
+            "/oidc/unknown/.well-known/oauth-authorization-server",
+            "/.well-known/oauth-authorization-server/oidc",
+            "/oidc/.well-known/openid-configuration",
+            "/.well-known/openid-configuration",
+            FE + "/.well-known/webfinger",
+            FE + "/.well-known/security.txt",
+        ],
+    )
+    def test_unknown_frontend_or_service(self, client, path):
+        assert client.get(path).status_code == 404
+
+    def test_unknown_frontend_endpoints(self, client):
+        assert client.post(PREFIX + "/unknown/pushed_authorization").status_code == 404
+        assert client.post(PREFIX + "/unknown/token").status_code == 404
+        assert client.get(PREFIX + "/unknown/authorization").status_code == 404
 
     def test_index(self, client):
-        assert client.get("/").status_code == 200
+        assert client.get(PREFIX + "/").status_code == 200
 
     @pytest.fixture
     def published_jwks(self, app):
@@ -750,15 +813,15 @@ class TestDiscoveryAndStatic:
         os.remove(path)
 
     def test_static_file(self, client, published_jwks):
-        response = client.get(f"/static/{published_jwks}")
+        response = client.get(f"{PREFIX}/static/{published_jwks}")
         assert response.status_code == 200
         assert "keys" in json.loads(response.data)
 
     def test_static_path_traversal_refused(self, client):
-        assert client.get("/static/../config.yaml").status_code == 404
+        assert client.get(PREFIX + "/static/../config.yaml").status_code == 404
 
     def test_keys_serves_published_jwks(self, client, published_jwks):
-        response = client.get(f"/keys/{published_jwks}")
+        response = client.get(f"{PREFIX}/keys/{published_jwks}")
         assert response.status_code == 200
         assert response.mimetype == "application/json"
         assert "keys" in response.get_json()

@@ -45,10 +45,10 @@ _06 Oct 2026_
 ### Added
 - `cleanup_interval` (minutes, default 60): `housekeeping.py` removes expired authorization requests, tokens and pushed requests in the background.
 - `require_wallet_attestation` (default `true`): `false` lets wallets authenticate as public clients; a sent attestation is still verified.
-- `par_allowed_htu` (DPoP add-on): the public `/pushed_authorization` URLs a DPoP proof may name.
-- `pop_allowed_aud` (token endpoint `kwargs`): the frontends' issuer identifiers, accepted as wallet attestation PoP `aud`.
+- `frontends`: the issuer frontends; each has its own issuer, `<issuer>/<frontend id>`, with its own PAR, authorization, token and metadata (upstream #12).
+- Metadata at all four discovery URLs of each issuer (RFC 8414 and OpenID Connect Discovery, inserted and appended).
 - `status_validation_context` (default `WalletOrKeyStorageStatus`, was `PIDStatus`): the status validator context for the WIA `client_status`.
-- `rate_limiting.forwarders`: peers whose requests are limited per `X-Forwarded-For` address (the frontend).
+- `rate_limiting.forwarders`: peers whose requests are limited per `X-Forwarded-For` address.
 - `webserver.host` (default `0.0.0.0`); it was hard-coded.
 
 ### Changed
@@ -56,8 +56,13 @@ _06 Oct 2026_
   - PKCE is required, `S256` only (`add_ons.pkce.kwargs.essential`); the misspelt option made it optional.
   - Authorization requests must be pushed (`require_pushed_authorization_requests`, HAIP).
   - `/token` requires a DPoP proof (`require_dpop`).
-  - `/.well-known/openid-configuration` reports the values in force.
 - DPoP is validated and bound by the idpy-oidc DPoP add-on only; `dpop.py` is removed.
+- The example configuration runs on its own hostname (`as.eudiw.dev`); an issuer with a path has its routes under that path, so no reverse proxy has to strip it (upstream #5).
+- Metadata is built from the running configuration; `openid-configuration.json` is removed. It adds `authorization_response_iss_parameter_supported`, `pre-authorized_grant_anonymous_access_supported` and the attestation algorithms.
+- The DPoP `htu` and the wallet attestation PoP `aud` are the frontend's issuer endpoints; `allowed_htu` is no longer configured.
+- Request URIs, codes and refresh tokens are only accepted at the issuer of their frontend; `/preauth_generate` requires `frontend_id`.
+- A trailing slash in `op.server_info.issuer` is ignored.
+- `rate_limiting.trusted_proxies` also applies with rate limiting off.
 - `/authorization` passes only `client_id` and `request_uri` to the authorization endpoint (RFC 9126 section 4).
 - Redirect URIs must be `https`, loopback `http` or a private-use scheme (not `javascript`, `data`, `vbscript`, `file`, `blob`, `about`), without a fragment.
 - Error responses follow RFC 6749, RFC 9126 and RFC 9396: JSON with `error_description`, `201` from PAR, `invalid_request_uri`, `invalid_authorization_details`, `405` for wrong methods, `no-store` on token responses.
@@ -67,6 +72,7 @@ _06 Oct 2026_
 - Dependencies are installed from `requirements.txt`.
 - `pyjwt` 2.15.1 (PYSEC-2026-178, PYSEC-2026-4140 to 4152, PYSEC-2026-4183).
 - `pipeline.yml` runs on `main` and `branch-*` instead of `dev`, `preprod` and `main`.
+- `pipeline.yml` always rebuilds the requirements layer (`no-cache-filters: builder`).
 - GitHub Actions: Docker actions pinned to commit SHAs; read-only token permissions per job.
 - The Docker build no longer upgrades pip; CI installs semgrep from wheels only.
 - Removed `yaml_to_json.py`.
@@ -82,3 +88,8 @@ _06 Oct 2026_
 - `python3 server.py -d <config>` crashed.
 - `auth_error_redirect` used the request's `redirect_uri` instead of the registered one (SonarCloud open redirect).
 - Logs contained the client's `client_id`, `request_uri` and token request form (SonarCloud log injection).
+- `/verify/user` and `/preauth_generate` crashed when the authorization endpoint issued no code or answered with `response_mode=form_post` (upstream eudi-srv-web-issuing-eudiw-py#166).
+- The authorization response `iss` (RFC 9207) did not match the metadata `issuer` (upstream #12).
+- The metadata lacked `dpop_signing_alg_values_supported` (upstream #6) and listed `public` instead of `none` (upstream eudi-srv-web-issuing-frontend-eudiw-py#14).
+- `trusted_attesters_path` was documented as a fallback of the trust validator; it is used only without one.
+- Requests to unknown paths with methods other than GET answered 405 instead of 404; `/jwks.json` was also served at the root.
