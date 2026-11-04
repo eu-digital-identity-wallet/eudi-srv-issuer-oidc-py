@@ -205,3 +205,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Keys are generated at start-up or mounted; never commit them.
+private/
+certs/
+static/jwks.json
