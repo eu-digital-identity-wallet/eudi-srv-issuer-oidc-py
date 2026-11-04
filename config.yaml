@@ -21,7 +21,7 @@ logging:
       formatter: default
     file:
       class: logging.FileHandler
-      filename: /tmp/oidc_log_dev/logs.log   # the folder must exist and be writable
+      filename: /tmp/oidc_log/logs.log   # the folder must exist and be writable
       formatter: default
   formatters:
     default:
@@ -200,7 +200,7 @@ op:
           # Wallet provider certificates (*.pem) trusted for wallet attestations.
           # Used only without trust_validator_url: with it, the validator alone
           # decides, and an unreachable validator fails the request.
-          trusted_attesters_path: /etc/eudiw/pid-issuer-dev/oidc_trusted_attesters
+          trusted_attesters_path: /etc/eudiw/pid-issuer/oidc_trusted_attesters
           # Trust validator (checks the attestation's x5c chain) and status
           # list validator (checks the attestation is not revoked).
           trust_validator_url: https://trust-validator.eudiw.dev/trust

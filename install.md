@@ -165,10 +165,7 @@ This guide provides step-by-step instructions for deploying the **EUDIW Issuer A
 
     Service parameters and sensitive settings are managed through a configuration file.
 
-    * **Create the configuration file:** We recommend copying the example file to create your local configuration.
-
-    * **Update variables:** Edit the newly created `config.yaml` file with your specific settings; every setting is commented.
-        * *Reference example:* [config.yaml example](./config.yaml)
+    * **Update variables:** Edit [config.yaml](./config.yaml), which `docker-compose.yml` mounts, with your specific settings, according to the [documentation](api_docs/configuration.md); every setting is commented.
         * A JSON file with the same keys still works (`server.py` reads `.json` or `.yaml` by extension); the Docker image reads `/etc/issuer_config/authorization_config.yaml`.
 
 
@@ -178,9 +175,9 @@ This guide provides step-by-step instructions for deploying the **EUDIW Issuer A
     docker compose pull
     ```
 
-5. Run the 
+5. Run the service
 
-    Start the EUDIW Issuer backend in detached mode (runs in the background):
+    Start the EUDIW Authorization Server in detached mode (runs in the background):
 
     ```
     docker compose up -d

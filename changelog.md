@@ -26,7 +26,6 @@ _06 Oct 2026_
 - HMAC algorithms removed from `dpop_signing_alg_values_supported`.
 - The discovery document no longer advertises logout support that is not implemented, and lists the pre-authorized code grant.
 - Session cookies are `Secure` and `HttpOnly`.
-- Requirements use the niscy-eudiw idpy-oidc fork pinned to a commit.
 - The Docker image runs as an unprivileged user (UID 10001) and only copies the application files.
 - CI: SonarCloud runs on `pull_request` instead of `pull_request_target` and actions are pinned to commit SHAs.
 - Removed the `/jwt_token` test route.
@@ -40,7 +39,9 @@ _06 Oct 2026_
 - A pushed authorization request whose client authentication (e.g. the WIA) fails returns that error instead of a 500.
 - Client authentication failures at `/token` and `/pushed_authorization` return 401 `invalid_client` instead of 400.
 
-## [Unreleased]
+## [0.10.0]
+
+_04 Nov 2026_
 
 ### Added
 - `cleanup_interval` (minutes, default 60): `housekeeping.py` removes expired authorization requests, tokens and pushed requests in the background.
@@ -70,6 +71,7 @@ _06 Oct 2026_
 - Refresh tokens, issuance usage rules and their sessions last one week.
 - `server.create_app(config_file)` builds the application, for `main()` and the tests. Coverage 70% -> 98%.
 - Dependencies are installed from `requirements.txt`.
+- idpy-oidc is installed from the eu-digital-identity-wallet `main` branch.
 - `pyjwt` 2.15.1 (PYSEC-2026-178, PYSEC-2026-4140 to 4152, PYSEC-2026-4183).
 - `pipeline.yml` runs on `main` and `branch-*` instead of `dev`, `preprod` and `main`.
 - `pipeline.yml` always rebuilds the requirements layer (`no-cache-filters: builder`).
@@ -77,6 +79,7 @@ _06 Oct 2026_
 - The Docker build no longer upgrades pip; CI installs semgrep from wheels only.
 - Removed `yaml_to_json.py`.
 - SonarCloud: `views.py` reads the DPoP header with `.get()`; the CSRF hotspot (S4502) is documented and marked `# NOSONAR`.
+- The log folder in the image, `docker-compose.yml` and the example configuration is `/tmp/oidc_log` (was `oidc_log_dev`); the example `trusted_attesters_path` is under `/etc/eudiw/pid-issuer`.
 
 ### Fixed
 - A code from a request with `dpop_jkt` could be redeemed with any key's DPoP proof (RFC 9449 section 10).
@@ -93,3 +96,4 @@ _06 Oct 2026_
 - The metadata lacked `dpop_signing_alg_values_supported` (upstream #6) and listed `public` instead of `none` (upstream eudi-srv-web-issuing-frontend-eudiw-py#14).
 - `trusted_attesters_path` was documented as a fallback of the trust validator; it is used only without one.
 - Requests to unknown paths with methods other than GET answered 405 instead of 404; `/jwks.json` was also served at the root.
+- `install.md`: the Docker steps told to copy `config.yaml`, which `docker-compose.yml` mounts as is.

@@ -30,8 +30,8 @@ COPY templates/ ./templates/
 # it: chown 10001 <dir>). It writes the keys and the published static/jwks.json.
 RUN chmod +x run.sh \
  && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin issuer \
- && mkdir -p /tmp/oidc_log_dev /app/private /app/static \
- && chown -R issuer:issuer /app /tmp/oidc_log_dev
+ && mkdir -p /tmp/oidc_log /app/private /app/static \
+ && chown -R issuer:issuer /app /tmp/oidc_log
 
 USER issuer
 
