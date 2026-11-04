@@ -1,7 +1,17 @@
+import secrets
 import datetime
+import logging
 import threading
+import time
 import uuid
 from typing import Union, Dict, Optional
+
+logger = logging.getLogger(__name__)
+
+#: Minutes a pre-authorized code can be redeemed after it was issued.
+PREAUTH_CODE_LIFETIME_MINUTES = 10
+#: Wrong tx_code attempts after which a pre-authorized code is revoked.
+MAX_TX_CODE_ATTEMPTS = 5
 
 
 # --- Oid4vciSession: The data model for a single request session ---
@@ -32,6 +42,11 @@ class Oid4vciSession:
         pre_authorized_code_ref (Optional[str]): The reference value for the pre-authorized code.
         tx_code (Optional[int]): The transaction code for the issuance process.
         frontend_id (Optional[str]): The frontend identifier associated with this session.
+        issuer_state (Optional[str]): issuer_state sent by the wallet (from a
+            credential offer); never used as the session id.
+        tx_code_failures (int): Wrong tx_code attempts so far.
+        preauth_expiry_time (Optional[datetime.datetime]): When the
+            pre-authorized code stops being redeemable.
     """
 
     def __init__(
@@ -54,6 +69,7 @@ class Oid4vciSession:
         pre_authorized_code_ref: Optional[str] = None,
         tx_code: Optional[int] = None,
         frontend_id: Optional[str] = None,
+        issuer_state: Optional[str] = None,
     ):
         """Initializes a new Oid4vciRequest instance."""
         self.client_id = client_id
@@ -74,6 +90,9 @@ class Oid4vciSession:
         self.pre_authorized_code_ref = pre_authorized_code_ref
         self.tx_code = tx_code
         self.frontend_id = frontend_id
+        self.issuer_state = issuer_state
+        self.tx_code_failures = 0
+        self.preauth_expiry_time: Optional[datetime.datetime] = None
 
     def to_dict(self) -> Dict:
         """Converts the Oid4vciRequest object into a dictionary."""
@@ -130,20 +149,10 @@ class Oid4vciSession:
             optional_parts.append(f"request_uri='{self.request_uri}'")
         if self.state:
             optional_parts.append(f"state='{self.state}'")
-        if self.code:
-            optional_parts.append(f"code='{self.code}'")
-        if self.access_token:
-            optional_parts.append(f"access_token='{self.access_token}'")
-        if self.refresh_token:
-            optional_parts.append(f"refresh_token='{self.refresh_token}'")
-        if self.pre_authorized_code:
-            optional_parts.append(f"pre_authorized_code='{self.pre_authorized_code}'")
-        if self.pre_authorized_code_ref:
-            optional_parts.append(
-                f"pre_authorized_code_ref='{self.pre_authorized_code_ref}'"
-            )
-        if self.tx_code:
-            optional_parts.append(f"tx_code={self.tx_code}")
+        # Codes, tokens and the tx_code are secrets: only their presence is shown.
+        for name in ("code", "access_token", "refresh_token", "pre_authorized_code", "pre_authorized_code_ref", "tx_code"):
+            if getattr(self, name):
+                optional_parts.append(f"{name}=<set>")
         if self.frontend_id:
             optional_parts.append(f"frontend_id='{self.frontend_id}'")
 
@@ -155,6 +164,10 @@ class Oid4vciSession:
             f"{', '.join(optional_parts)}, "
             f"expiry_time='{self.expiry_time.isoformat()}')"
         )
+
+
+class RequestLimitExceeded(Exception):
+    """Raised when the in-memory request store is full of live requests."""
 
 
 # --- RequestManager: The thread-safe manager for all request sessions ---
@@ -169,7 +182,10 @@ class RequestManager:
     parts of the data store concurrently without corrupting data.
     """
 
-    def __init__(self, default_expiry_minutes: int = 15):
+    #: Seconds between two automatic clean-ups of expired requests.
+    CLEAN_INTERVAL = 60
+
+    def __init__(self, default_expiry_minutes: int = 15, max_requests: int = 50_000):
         # The primary storage for request objects, keyed by a unique session ID.
         self._requests: Dict[str, Oid4vciSession] = {}
         # Secondary indexes for fast lookup by different attributes.
@@ -180,6 +196,12 @@ class RequestManager:
         self._requests_by_refresh_token: Dict[str, Oid4vciSession] = {}
 
         self.default_expiry_minutes = default_expiry_minutes
+        # Requests are kept in memory: cap them so a flood cannot exhaust it.
+        self.max_requests = max_requests
+        # Never cleaned yet: the first call is due. (0.0 was not: time.monotonic()
+        # counts from boot, so on a host up for less than CLEAN_INTERVAL nothing
+        # was cleaned.)
+        self._last_clean = float("-inf")
 
         # Create a separate lock for each dictionary to enable fine-grained locking.
         # This allows a thread to access one dictionary while another thread
@@ -207,6 +229,7 @@ class RequestManager:
         pre_authorized_code_ref: Optional[str] = None,
         tx_code: Optional[int] = None,
         frontend_id: Optional[str] = None,
+        issuer_state: Optional[str] = None,
     ) -> Oid4vciSession:
         """
         Creates and stores a new Oid4vciRequest object.
@@ -236,12 +259,18 @@ class RequestManager:
             pre_authorized_code_ref=pre_authorized_code_ref,
             tx_code=tx_code,
             frontend_id=frontend_id,
+            issuer_state=issuer_state,
         )
 
+        self._clean_if_due()
         # Acquire lock only for the primary _requests dictionary.
         with self._requests_lock:
+            if session_id not in self._requests and len(self._requests) >= self.max_requests:
+                self.clean_expired_requests()
+                if len(self._requests) >= self.max_requests:
+                    raise RequestLimitExceeded("Too many pending authorization requests")
             self._requests[session_id] = request_obj
-            print(
+            logger.debug(
                 f"Added request with session_id: {session_id} (Expires: {expiry_time.isoformat()})"
             )
         return request_obj
@@ -264,10 +293,10 @@ class RequestManager:
 
                 request_obj.request_uri = request_uri
                 self._requests_by_uri[request_uri] = request_obj
-                print(f"Updated request {session_id} with request_uri: {request_uri}")
+                logger.debug(f"Updated request {session_id} with request_uri: {request_uri}")
             else:
-                print(
-                    f"Warning: Attempted to update URI for non-existent session_id: {session_id}"
+                logger.warning(
+                    f"Attempted to update URI for non-existent session_id: {session_id}"
                 )
 
     def update_code(self, session_id: str, code: str):
@@ -283,10 +312,10 @@ class RequestManager:
 
                 request_obj.code = code
                 self._requests_by_code[code] = request_obj
-                print(f"Updated code for session_id {session_id} to: {code}")
+                logger.debug(f"Updated code for session_id {session_id}")
             else:
-                print(
-                    f"Warning: Attempted to update code for non-existent session_id: {session_id}"
+                logger.warning(
+                    f"Attempted to update code for non-existent session_id: {session_id}"
                 )
 
     def update_access_token(self, session_id: str, access_token: str):
@@ -298,18 +327,23 @@ class RequestManager:
             request_obj = self._requests.get(session_id)
             if request_obj:
                 request_obj.access_token = access_token
-                print(
-                    f"Updated access_token for session_id {session_id} to: {access_token}"
+                logger.debug(
+                    f"Updated access_token for session_id {session_id}"
                 )
             else:
-                print(
-                    f"Warning: Attempted to update access_token for non-existent session_id: {session_id}"
+                logger.warning(
+                    f"Attempted to update access_token for non-existent session_id: {session_id}"
                 )
 
-    def update_refresh_token(self, session_id: str, refresh_token: str):
+    def update_refresh_token(
+        self, session_id: str, refresh_token: str, lifetime_seconds: Optional[int] = None
+    ):
         """
         Updates the 'refresh_token' and its lookup index.
         Requires locking both the primary and refresh token dictionaries.
+
+        :param lifetime_seconds: how long the refresh token is valid; the session
+            is kept at least that long, or the token could not be looked up.
         """
         with self._requests_lock, self._requests_by_refresh_token_lock:
             request_obj = self._requests.get(session_id)
@@ -322,12 +356,18 @@ class RequestManager:
 
                 request_obj.refresh_token = refresh_token
                 self._requests_by_refresh_token[refresh_token] = request_obj
-                print(
-                    f"Updated refresh_token for session_id {session_id} to: {refresh_token}"
+                if lifetime_seconds:
+                    request_obj.expiry_time = max(
+                        request_obj.expiry_time,
+                        datetime.datetime.now(datetime.timezone.utc)
+                        + datetime.timedelta(seconds=lifetime_seconds),
+                    )
+                logger.debug(
+                    f"Updated refresh_token for session_id {session_id}"
                 )
             else:
-                print(
-                    f"Warning: Attempted to update refresh_token for non-existent session_id: {session_id}"
+                logger.warning(
+                    f"Attempted to update refresh_token for non-existent session_id: {session_id}"
                 )
 
     def update_pre_authorized_code(self, session_id: str, pre_authorized_code: str):
@@ -347,12 +387,12 @@ class RequestManager:
 
                 request_obj.pre_authorized_code = pre_authorized_code
                 self._requests_by_preauth_code[pre_authorized_code] = request_obj
-                print(
-                    f"Updated pre_authorized_code for session_id {session_id} to: {pre_authorized_code}"
+                logger.debug(
+                    f"Updated pre_authorized_code for session_id {session_id}"
                 )
             else:
-                print(
-                    f"Warning: Attempted to update pre_authorized_code for non-existent session_id: {session_id}"
+                logger.warning(
+                    f"Attempted to update pre_authorized_code for non-existent session_id: {session_id}"
                 )
 
     def update_pre_authorized_code_ref(
@@ -375,16 +415,58 @@ class RequestManager:
                     ]
 
                 request_obj.pre_authorized_code_ref = pre_authorized_code_ref
+                request_obj.preauth_expiry_time = datetime.datetime.now(
+                    datetime.timezone.utc
+                ) + datetime.timedelta(minutes=PREAUTH_CODE_LIFETIME_MINUTES)
+                request_obj.tx_code_failures = 0
                 self._requests_by_preauth_code_ref[pre_authorized_code_ref] = (
                     request_obj
                 )
-                print(
-                    f"Updated pre_authorized_code_ref for session_id {session_id} to: {pre_authorized_code_ref}"
+                logger.debug(
+                    f"Updated pre_authorized_code_ref for session_id {session_id}"
                 )
             else:
-                print(
-                    f"Warning: Attempted to update pre_authorized_code_ref for non-existent session_id: {session_id}"
+                logger.warning(
+                    f"Attempted to update pre_authorized_code_ref for non-existent session_id: {session_id}"
                 )
+
+    def preauth_code_expired(self, request_obj: Oid4vciSession) -> bool:
+        """Tells whether a pre-authorized code is past its redemption window."""
+        expiry = request_obj.preauth_expiry_time
+        return expiry is not None and datetime.datetime.now(datetime.timezone.utc) >= expiry
+
+    def check_tx_code(self, request_obj: Oid4vciSession, candidate) -> str:
+        """Compares a tx_code and counts a wrong one, in one step.
+
+        Concurrent guesses all found the code before any revoked it, so more
+        than ``MAX_TX_CODE_ATTEMPTS`` could be compared. The comparison and the
+        count now happen under one lock, and a code that reached the limit is
+        never compared again.
+
+        Returns:
+            ``"ok"``; ``"wrong"``; ``"revoked"`` (this guess reached the
+            limit); or ``"invalid"`` (the limit was already reached).
+        """
+        with self._requests_lock:
+            if request_obj.tx_code_failures >= MAX_TX_CODE_ATTEMPTS:
+                return "invalid"
+            if secrets.compare_digest(str(candidate), str(request_obj.tx_code)):
+                return "ok"
+            request_obj.tx_code_failures += 1
+            revoked = request_obj.tx_code_failures >= MAX_TX_CODE_ATTEMPTS
+        if revoked:
+            logger.warning(f"Too many wrong tx_code attempts for session_id {request_obj.session_id}; code revoked")
+            self.revoke_preauth_code(request_obj)
+        return "revoked" if revoked else "wrong"
+
+    def revoke_preauth_code(self, request_obj: Oid4vciSession) -> None:
+        """Makes a pre-authorized code unusable (it was redeemed or attacked)."""
+        with self._requests_by_preauth_code_ref_lock:
+            if request_obj.pre_authorized_code_ref:
+                self._requests_by_preauth_code_ref.pop(request_obj.pre_authorized_code_ref, None)
+        with self._requests_by_preauth_code_lock:
+            if request_obj.pre_authorized_code:
+                self._requests_by_preauth_code.pop(request_obj.pre_authorized_code, None)
 
     def update_tx_code(self, session_id: str, tx_code: int):
         """
@@ -395,10 +477,10 @@ class RequestManager:
             request_obj = self._requests.get(session_id)
             if request_obj:
                 request_obj.tx_code = tx_code
-                print(f"Updated tx_code for session_id {session_id} to: {tx_code}")
+                logger.debug(f"Updated tx_code for session_id {session_id}")
             else:
-                print(
-                    f"Warning: Attempted to update tx_code for non-existent session_id: {session_id}"
+                logger.warning(
+                    f"Attempted to update tx_code for non-existent session_id: {session_id}"
                 )
 
     def update_frontend_id(self, session_id: str, frontend_id: str):
@@ -409,12 +491,12 @@ class RequestManager:
             request_obj = self._requests.get(session_id)
             if request_obj:
                 request_obj.frontend_id = frontend_id
-                print(
+                logger.debug(
                     f"Updated frontend_id for session_id {session_id} to: {frontend_id}"
                 )
             else:
-                print(
-                    f"Warning: Attempted to update frontend_id for non-existent session_id: {session_id}"
+                logger.warning(
+                    f"Attempted to update frontend_id for non-existent session_id: {session_id}"
                 )
 
     def get_request(self, session_id: str) -> Optional[Oid4vciSession]:
@@ -427,7 +509,7 @@ class RequestManager:
             if request_obj and not self.is_expired(request_obj):
                 return request_obj
             elif request_obj and self.is_expired(request_obj):
-                print(
+                logger.debug(
                     f"Request with session_id {session_id} found but has expired. Removing."
                 )
                 # If a request is expired, we need to clean it up from all managers.
@@ -440,31 +522,14 @@ class RequestManager:
         Retrieves a request by its URI.
         Locks the URI index for a safe read.
         """
-        with self._requests_by_uri_lock:
-            request_obj = self._requests_by_uri.get(request_uri)
-            if request_obj and not self.is_expired(request_obj):
-                return request_obj
-            elif request_obj and self.is_expired(request_obj):
-                print(
-                    f"Request with request_uri {request_uri} found but has expired. Removing."
-                )
-                # Needs to lock all managers to clean up the request completely.
-                self._remove_request_from_all_managers(request_obj)
-        return None
+        return self._lookup(self._requests_by_uri, self._requests_by_uri_lock, request_uri)
 
     def get_request_by_code(self, code: str) -> Optional[Oid4vciSession]:
         """
         Retrieves a request by its code.
         Locks the code index for a safe read.
         """
-        with self._requests_by_code_lock:
-            request_obj = self._requests_by_code.get(code)
-            if request_obj and not self.is_expired(request_obj):
-                return request_obj
-            elif request_obj and self.is_expired(request_obj):
-                print(f"Request with code {code} found but has expired. Removing.")
-                self._remove_request_from_all_managers(request_obj)
-        return None
+        return self._lookup(self._requests_by_code, self._requests_by_code_lock, code)
 
     def get_request_by_preauth_code(
         self, pre_authorized_code: str
@@ -473,16 +538,7 @@ class RequestManager:
         Retrieves a request by its pre-authorized code.
         Locks the pre-auth code index.
         """
-        with self._requests_by_preauth_code_lock:
-            request_obj = self._requests_by_preauth_code.get(pre_authorized_code)
-            if request_obj and not self.is_expired(request_obj):
-                return request_obj
-            elif request_obj and self.is_expired(request_obj):
-                print(
-                    f"Request with pre_authorized_code {pre_authorized_code} found but has expired. Removing."
-                )
-                self._remove_request_from_all_managers(request_obj)
-        return None
+        return self._lookup(self._requests_by_preauth_code, self._requests_by_preauth_code_lock, pre_authorized_code)
 
     def get_request_by_preauth_code_ref(
         self, pre_authorized_code_ref: str
@@ -491,18 +547,7 @@ class RequestManager:
         Retrieves a request by its pre-authorized code ref.
         Locks the pre-auth code ref index.
         """
-        with self._requests_by_preauth_code_ref_lock:
-            request_obj = self._requests_by_preauth_code_ref.get(
-                pre_authorized_code_ref
-            )
-            if request_obj and not self.is_expired(request_obj):
-                return request_obj
-            elif request_obj and self.is_expired(request_obj):
-                print(
-                    f"Request with pre_authorized_code_ref {pre_authorized_code_ref} found but has expired. Removing."
-                )
-                self._remove_request_from_all_managers(request_obj)
-        return None
+        return self._lookup(self._requests_by_preauth_code_ref, self._requests_by_preauth_code_ref_lock, pre_authorized_code_ref)
 
     def get_request_by_refresh_token(
         self, refresh_token: str
@@ -511,15 +556,23 @@ class RequestManager:
         Retrieves a request by its refresh token.
         Locks the refresh token index.
         """
-        with self._requests_by_refresh_token_lock:
-            request_obj = self._requests_by_refresh_token.get(refresh_token)
-            if request_obj and not self.is_expired(request_obj):
-                return request_obj
-            elif request_obj and self.is_expired(request_obj):
-                print(
-                    f"Request with refresh_token {refresh_token} found but has expired. Removing."
-                )
-                self._remove_request_from_all_managers(request_obj)
+        return self._lookup(self._requests_by_refresh_token, self._requests_by_refresh_token_lock, refresh_token)
+
+    def _lookup(self, index: Dict, lock, key) -> Optional[Oid4vciSession]:
+        """Reads ``index[key]``; drops the request when it has expired.
+
+        The index lock is released before the removal, which takes every lock
+        starting with ``_requests_lock``: holding an index lock while waiting
+        for ``_requests_lock`` deadlocked against ``clean_expired_requests``.
+        """
+        with lock:
+            request_obj = index.get(key)
+        if request_obj is None:
+            return None
+        if not self.is_expired(request_obj):
+            return request_obj
+        logger.debug("Request %s has expired. Removing.", request_obj.session_id)
+        self._remove_request_from_all_managers(request_obj)
         return None
 
     def is_expired(self, request_obj: Oid4vciSession) -> bool:
@@ -563,7 +616,14 @@ class RequestManager:
                 and request_obj.refresh_token in self._requests_by_refresh_token
             ):
                 del self._requests_by_refresh_token[request_obj.refresh_token]
-            print(f"Removed all references for session_id: {request_obj.session_id}")
+            logger.debug(f"Removed all references for session_id: {request_obj.session_id}")
+
+    def _clean_if_due(self):
+        """Runs :meth:`clean_expired_requests` at most every ``CLEAN_INTERVAL`` seconds."""
+        now = time.monotonic()
+        if now - self._last_clean >= self.CLEAN_INTERVAL:
+            self._last_clean = now
+            self.clean_expired_requests()
 
     def clean_expired_requests(self):
         """
@@ -581,15 +641,15 @@ class RequestManager:
             ]
             for session_id in expired_session_ids:
                 request_obj = self._requests[session_id]
-                print(
+                logger.debug(
                     f"Cleaning up expired request: {session_id} (URI: {request_obj.request_uri})"
                 )
                 self._remove_request_from_all_managers(request_obj)
 
             if expired_session_ids:
-                print(f"Cleaned up {len(expired_session_ids)} expired requests.")
+                logger.debug(f"Cleaned up {len(expired_session_ids)} expired requests.")
             else:
-                print("No expired requests to clean up.")
+                logger.debug("No expired requests to clean up.")
 
     def get_active_requests_count(self) -> int:
         """

@@ -1,0 +1,8 @@
+# Coverage settings for pytest-cov (CI: pytest --cov=. --cov-report=xml:coverage.xml tests)
+[run]
+branch = true
+omit =
+    tests/*
+
+[report]
+show_missing = true

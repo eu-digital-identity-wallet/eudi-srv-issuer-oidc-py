@@ -1,6 +1,6 @@
 # Token request (Post)
 
-**Endpoint**: <https://issuer.eudiw.dev/token> (or <https://localhost/token> if installed locally)
+**Endpoint**: `<issuer>/token`, e.g. <https://as.eudiw.dev/FRONTEND_ID/token> (the frontend's issuer, see [configuration](configuration.md#issuers))
 
 ## Token request with PKCE
 

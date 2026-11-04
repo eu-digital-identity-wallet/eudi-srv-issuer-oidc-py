@@ -4,3 +4,9 @@ __pycache__
 .venv
 .env
 *.md
+private/
+certs/
+static/jwks.json
+*.key
+*.pem
+tests/

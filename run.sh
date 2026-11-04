@@ -1,3 +1,3 @@
 #!/bin/bash
 
-python3 server.py config.json
+python3 server.py config.yaml
