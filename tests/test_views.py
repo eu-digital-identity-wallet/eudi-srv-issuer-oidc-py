@@ -799,19 +799,6 @@ class TestDiscoveryAndStatic:
     def test_index(self, client):
         assert client.get(PREFIX + "/").status_code == 200
 
-    @pytest.fixture
-    def published_jwks(self, app):
-        """A JWKS file in static/ (the real one is generated at start-up and not in git)."""
-        import os
-        import uuid
-
-        name = f"test-{uuid.uuid4().hex}.json"
-        path = os.path.join(app.root_path, "static", name)
-        with open(path, "w") as f:
-            json.dump({"keys": []}, f)
-        yield name
-        os.remove(path)
-
     def test_static_file(self, client, published_jwks):
         response = client.get(f"{PREFIX}/static/{published_jwks}")
         assert response.status_code == 200

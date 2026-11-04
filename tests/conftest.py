@@ -146,6 +146,17 @@ def client(app):
 
 
 @pytest.fixture
+def published_jwks(app):
+    """A JWKS file in static/ (the real one is generated at start-up and not in git)."""
+    name = f"test-{uuid.uuid4().hex}.json"
+    path = os.path.join(app.root_path, "static", name)
+    with open(path, "w") as f:
+        json.dump({"keys": []}, f)
+    yield name
+    os.remove(path)
+
+
+@pytest.fixture
 def wia(app):
     """wia(client_id=..., **kw) -> WIA + PoP headers for FRONTEND_ID's issuer."""
     issuer = f"{app.server.get_context().issuer}/{FRONTEND_ID}"

@@ -162,8 +162,8 @@ class TestConfiguration:
         assert metadata["token_endpoint"] == f"https://as.test/{FRONTEND_ID}/token"
         assert metadata["jwks_uri"] == "https://as.test/static/jwks.json"
 
-    def test_no_routes_outside_the_issuer(self, client):
+    def test_no_routes_outside_the_issuer(self, client, published_jwks):
         # No catch-all static route: the old endpoints at the root are gone for every method.
         for method, url in (("POST", "/token"), ("POST", "/pushed_authorization"), ("PUT", "/x"), ("GET", "/jwks.json")):
             assert client.open(url, method=method).status_code == 404, (method, url)
-        assert client.get(PREFIX + "/static/jwks.json").status_code == 200
+        assert client.get(f"{PREFIX}/static/{published_jwks}").status_code == 200
